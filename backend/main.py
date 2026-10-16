@@ -6,10 +6,6 @@ management, vision processing, the TCP trigger server for PLC integration,
 and the web interface.
 """
 
-import os
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-os.environ.setdefault("KMP_BLOCKTIME", "0")
-
 import threading
 import keyboard
 import uvicorn
