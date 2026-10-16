@@ -31,8 +31,6 @@ class AppState:
         self.maintenance_session_token = ""
         self.maintenance_session_user = ""
         self.camera_rotation = 0  # steps: 0, 1, 2, 3 (each = 90° clockwise)
-        self.vision_mode = cfg["vision_mode"]
-        self.ocr_keyword = cfg["ocr"]["keywords"][0] if cfg["ocr"]["keywords"] else ""
         self.set_threshold(float(cfg["confidence_threshold"]))
 
     def update_result(self, result: dict):
@@ -73,8 +71,6 @@ class AppState:
                 "result": dict(self.latest_result),
                 "counters": dict(self.counters),
                 "maintenance_mode": self.maintenance_mode,
-                "vision_mode": self.vision_mode,
-                "ocr_keyword": self.ocr_keyword,
             }
 
     def get_threshold(self) -> float:
@@ -146,32 +142,3 @@ class AppState:
         """
         with self.lock:
             self.camera_rotation = (self.camera_rotation + 1) % 4
-
-    def get_vision_mode(self) -> str:
-        """
-        Gets the current vision mode ('ocr' or 'ocread').
-        """
-        with self.lock:
-            return self.vision_mode
-
-    def set_vision_mode(self, value: str):
-        """
-        Sets the vision mode.
-        """
-        with self.lock:
-            if value in ("ocr", "ocread"):
-                self.vision_mode = value
-
-    def get_ocr_keyword(self) -> str:
-        """
-        Gets the keyword used for OCR filtering.
-        """
-        with self.lock:
-            return self.ocr_keyword
-
-    def set_ocr_keyword(self, value: str):
-        """
-        Sets the keyword used for OCR filtering.
-        """
-        with self.lock:
-            self.ocr_keyword = value.strip().lower()

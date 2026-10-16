@@ -2,24 +2,12 @@
 # Default configuration for the machine vision application
 
 # Top-level settings
-vision_mode: "ocread"  # valid values: "ocr", "ocread"
 machine_id: "default"
 confidence_threshold: 0.8
-
-# Region of Interest (ROI) settings
-roi:
-  x_start: 0.2
-  y_start: 0.7
-  x_end: 0.8
-  y_end: 0.9
 
 # OCR settings
 ocr:
   engine: "paddleocr"   # valid values: "tesseract" (default), "paddleocr"
-  keywords:
-    - "Made in Germany"
-  # Regex matches dates in DD/MM/YYYY or MM/DD/YYYY format
-  date_regex: '\b\d{2}/\d{2}/\d{4}\b'
   preprocess: "fast"  # valid values: "fast" (default), "accurate"
 
   # downscale/min_dim shrink the crop before inference to save time.
@@ -505,7 +493,6 @@ camera:
 
 # HMI settings
 hmi:
-  debug_draw_roi: true
   enable_video_feed: true
 
 # Web settings

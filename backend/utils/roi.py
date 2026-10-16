@@ -1,19 +1,9 @@
 """backend/utils/roi.py
 
-Shared ROI helpers used by both the OCR pipeline and the HMI video stream.
-
-Having this logic in one place means any change to how fractional vs pixel
-coordinates are resolved, or how edge-clamping works, only needs to be made
-here — not in web.py AND paddle_ocr.py.
+ROI coordinate helper used by the text locator (ocr.dynamic_roi.search_roi).
 """
 
 from __future__ import annotations
-
-import cv2
-import numpy as np
-from backend.utils.logger import get_logger
-
-log = get_logger(__name__)
 
 
 def roi_to_pixels(
@@ -54,51 +44,3 @@ def roi_to_pixels(
         return 0, 0, 0, 0
 
     return x1, y1, x2, y2
-
-
-def draw_roi(frame: np.ndarray, roi: dict, color=(0, 255, 0), thickness: int = 2) -> np.ndarray:
-    """Draw the ROI rectangle onto *frame* in-place and return it.
-
-    Args:
-        frame:     BGR (or grayscale) frame to draw on.
-        roi:       ROI config dict (x_start / y_start / x_end / y_end).
-        color:     BGR colour tuple for the rectangle.
-        thickness: Line thickness in pixels.
-
-    Returns:
-        The same frame with the rectangle drawn (no copy is made).
-    """
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = roi_to_pixels(roi, w, h)
-
-    if x2 == 0 and y2 == 0:
-        return frame  # empty box — nothing to draw
-
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-    return frame
-
-
-def apply_roi(frame: np.ndarray, roi: dict) -> np.ndarray:
-    """Crop *frame* to the region described by *roi*.
-
-    Args:
-        frame: BGR (or grayscale) input frame.
-        roi:   ROI config dict (x_start / y_start / x_end / y_end).
-
-    Returns:
-        Cropped sub-frame, or the original frame when the ROI is invalid /
-        results in an empty crop.
-    """
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = roi_to_pixels(roi, w, h)
-
-    if x2 == 0 and y2 == 0:
-        return frame  # empty box — return full frame unchanged
-
-    cropped = frame[y1:y2, x1:x2]
-
-    if cropped is None or cropped.size == 0:
-        log.warning("ROI crop resulted in an empty frame; returning original.")
-        return frame
-
-    return cropped

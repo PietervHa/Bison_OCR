@@ -261,7 +261,7 @@ class FusionTests(unittest.TestCase):
 
 
 class PositionVoteReadTests(ConsensusTests):
-    VARIANTS = ("dot_divide", "dot_subtract", "classic", "region", "region_dot", "full_frame", "ocr_pipeline")
+    VARIANTS = ("dot_divide", "dot_subtract", "classic", "region", "region_dot", "full_frame", "dot_divide_x3")
 
     def _vote_engine(self, *script, min_reads=3, min_share=0.7):
         e = self._engine(*script, variants=self.VARIANTS, min_agree=2)
@@ -292,9 +292,6 @@ class PositionVoteReadTests(ConsensusTests):
         region = e._frame_variant_input(frame, located, "region")
         self.assertGreater(region.shape[1], 160 + 2 * 40)       # box widened on both sides
         self.assertEqual(e._frame_variant_input(frame, None, "region").shape[:2], e._downscale_roi(frame).shape[:2])
-        before = frame.copy()
-        e._frame_variant_input(frame, located, "ocr_pipeline")
-        self.assertTrue(np.array_equal(frame, before), "OCR-pipeline read must not draw on the shared frame")
 
 
 class VisionStatusTests(unittest.TestCase):
@@ -306,7 +303,7 @@ class VisionStatusTests(unittest.TestCase):
         n = vision._normalize_result({"detections": [{"text": "4113 08:2", "confidence": 0.9}],
                                       "text": "4113 08:2", "mode": "ocread",
                                       "validation": {"accepted": False, "reason": "format_mismatch"},
-                                      "failure_reason": "format_mismatch"}, "ocread")
+                                      "failure_reason": "format_mismatch"})
         self.assertEqual((n["status"], n["failure_reason"]), ("NOK", "format_mismatch"))
 
 

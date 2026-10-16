@@ -33,19 +33,10 @@
                 <div class="camera-disconnected-text">Camera disconnected — reconnecting...</div>
             </div>
             <div id="below-feed" class="below-feed">
-                <div id="visionModeToggle" class="vision-toggle">
-                    <span>Vision Mode:</span>
-                    <button id="modeOcrBtn" class="mode-btn active">OCR</button>
-                    <button id="modeOcreadBtn" class="mode-btn">OCRead</button>
+                <div id="cameraControls" class="vision-toggle">
                     <button id="rotateCameraBtn" class="mode-btn rotate-btn" title="Rotate 90°">90</button>
                 </div>
-                <div id="ocrKeywordSection" class="ocr-keyword-row" style="display:none;">
-                    <span>Searched word:</span>
-                    <input type="text" id="ocrKeywordInput" placeholder="bijv. www.example.com">
-                    <button id="applyOcrKeyword">Apply</button>
-                </div>
-                <div id="dynamicLabel" class="dynamic-label">-</div>
-                <div id="ocreadTextSection" class="dynamic-label" style="display:none;">
+                <div id="ocreadTextSection" class="dynamic-label">
                     Read text: <span id="ocreadText">-</span>
                 </div>
                 <div id="cycleTimeSection" class="cycle-time" style="display:none;">
@@ -65,7 +56,7 @@
             </div>
 
             <div class="info-box">
-                <h2 id="detectionsHeading">Detections</h2>
+                <h2 id="detectionsHeading">Recognized Text</h2>
                 <div id="detections" class="detections">None</div>
             </div>
 

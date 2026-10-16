@@ -155,11 +155,6 @@ class OCReadRoutingTests(unittest.TestCase):
             engine.read(self._frame())
         derib.assert_called_once()
 
-    def test_plain_ocr_mode_is_unaffected(self):
-        engine = self._engine(dot_text_enabled=True, derib_enabled=False)
-        with mock.patch("backend.detection.ocr.paddle_ocr.clean_dot_text",
-                        side_effect=AssertionError("dot_text is OCRead-only")):
-            engine.run(self._frame())
 
 
 if __name__ == "__main__":

@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from pathlib import Path
 from backend.core import auth, db
 from backend.core.config_loader import cfg
-from backend.utils.roi import draw_roi
 import time
 
 
@@ -54,14 +53,6 @@ class MaintenanceModeBody(BaseModel):
     maintenance_mode: bool = False
     username: str = ""
     password: str = ""
-
-
-class VisionModeBody(BaseModel):
-    vision_mode: str = ""
-
-
-class OcrKeywordBody(BaseModel):
-    ocr_keyword: str = ""
 
 
 def create_app(camera, app_state) -> FastAPI:
@@ -119,19 +110,8 @@ def create_app(camera, app_state) -> FastAPI:
                 time.sleep(0.01)
                 continue
 
-            frame_for_stream = frame
-            roi = cfg.get("roi")
-            # OCRead has no static ROI at all (see paddle_ocr.py _apply_roi) -
-            # it locates and deskews the text region fresh on every frame, so
-            # a fixed box here would be meaningless and wouldn't track what's
-            # actually being read. Only draw it for the plain "ocr" mode,
-            # which still uses the static box.
-            if cfg["hmi"]["debug_draw_roi"] and app_state.get_vision_mode() == "ocr" and roi:
-                # use shared draw_roi instead of inline _draw_roi helper
-                frame_for_stream = draw_roi(frame.copy(), roi)
-
             # encode with configured quality instead of OpenCV default (95)
-            _, buffer = cv2.imencode(".jpg", frame_for_stream,
+            _, buffer = cv2.imencode(".jpg", frame,
                                      [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             yield (
                 b"--frame\r\n"
@@ -165,7 +145,6 @@ def create_app(camera, app_state) -> FastAPI:
         response.headers.update(_NO_STORE_HEADERS)
         is_maintenance = _is_maintenance_access(request)
         return {
-            "vision_mode": app_state.get_vision_mode(),
             "maintenance_mode": is_maintenance,
             "username": app_state.get_maintenance_session_user() if is_maintenance else None,
             "machine_id": cfg["machine_id"],
@@ -272,33 +251,12 @@ def create_app(camera, app_state) -> FastAPI:
             return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
         return {"logins": db.get_recent_logins(limit=20)}
 
-    @app.post("/vision_mode")
-    def set_vision_mode(body: VisionModeBody, request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
-        app_state.set_vision_mode(body.vision_mode)
-        return {"vision_mode": app_state.get_vision_mode()}
-
     @app.post("/camera_rotation")
     def rotate_camera(request: Request):
         if not _is_maintenance_access(request):
             return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
         app_state.rotate_camera()
         return {"camera_rotation": app_state.get_camera_rotation()}
-
-    @app.get("/ocr_keyword")
-    def get_ocr_keyword():
-        return {"ocr_keyword": app_state.get_ocr_keyword()}
-
-    @app.post("/ocr_keyword")
-    def set_ocr_keyword(body: OcrKeywordBody, request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
-        new_keyword = body.ocr_keyword.strip()
-        if not new_keyword:
-            return JSONResponse(status_code=400, content={"error": "ocr_keyword cannot be empty"})
-        app_state.set_ocr_keyword(new_keyword)
-        return {"ocr_keyword": app_state.get_ocr_keyword()}
 
     @app.get("/video_feed")
     def video_feed():

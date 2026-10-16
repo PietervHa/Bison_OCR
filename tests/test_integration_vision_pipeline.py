@@ -9,11 +9,6 @@ from backend.core import vision
 from backend.output import result_writer
 
 
-class _FakeAppState:
-    def get_vision_mode(self):
-        return "ocread"
-
-
 class _FakeOCR:
     def __init__(self, response):
         self._response = response
@@ -35,7 +30,6 @@ class VisionIntegrationTests(unittest.TestCase):
     def setUp(self):
         self._old_app_state = vision._app_state
         self._old_ocr = vision.ocr_instance
-        vision._app_state = _FakeAppState()
 
     def tearDown(self):
         vision._app_state = self._old_app_state

@@ -6,7 +6,6 @@ Provides the PaddleOCR class for text recognition using the PaddleOCR engine.
 
 import cv2
 import numpy as np
-import re
 import time
 import logging
 import os
@@ -17,7 +16,6 @@ from pathlib import Path
 from backend.detection.ocr.paddle_worker import PaddleOCRWorker, PaddleWorkerError
 from backend.core.config_loader import cfg
 from backend.utils.logger import get_logger
-from backend.utils.roi import apply_roi, draw_roi
 from backend.detection.ocr.text_locator import locate_text_region, deskew_crop
 from backend.detection.ocr.dot_text import clean_dot_text
 from backend.detection.ocr.code_validator import CodeTemplate, REJECT_CONSENSUS, REJECT_FORMAT, REJECT_CONFIDENCE
@@ -61,11 +59,6 @@ class PaddleOCR:
             text_recognition_model_name=ocr_cfg.get("text_recognition_model_name") or None,
             inference_timeout=float(ocr_cfg.get("inference_timeout_s", 10.0)),
         )
-        self.keywords = [w.lower() for w in ocr_cfg["keywords"]]
-        self.keyword_set = set(self.keywords)
-        self.date_regex = ocr_cfg["date_regex"]
-        self._date_pattern = re.compile(self.date_regex) if self.date_regex else None
-        self.debug_draw_roi = cfg["hmi"]["debug_draw_roi"]
         self.preprocess_mode = ocr_cfg["preprocess"].lower()
         self.downscale = float(ocr_cfg["downscale"])
         self.min_dim = int(ocr_cfg["min_dim"])
@@ -242,11 +235,10 @@ class PaddleOCR:
         self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         log.debug(
-            "PaddleOCR init: preprocess_mode=%s downscale=%s keywords=%s derib_enabled=%s "
+            "PaddleOCR init: preprocess_mode=%s downscale=%s derib_enabled=%s "
             "orientation_retry_enabled=%s dot_text_enabled=%s",
             self.preprocess_mode,
             self.downscale,
-            self.keywords,
             self.derib_enabled,
             self.orientation_retry_enabled,
             self.dot_text_enabled,
@@ -401,11 +393,10 @@ class PaddleOCR:
         new_h = max(1, int(round(h * scale)))
         return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    def _apply_roi(self, frame, dynamic=False):
+    def _apply_roi(self, frame):
         """Crop the frame to the text region.
 
-        dynamic=True is the OCRead-mode path, and it never touches
-        cfg["roi"]. It only ever does one of two things: crop to wherever
+        It only ever does one of two things: crop to wherever
         locate_text_region() actually found ink on this frame (deskewed via
         deskew_crop), or - if it found nothing at all - hand the full,
         uncropped frame to OCR rather than guessing a fixed rectangle. A
@@ -415,66 +406,48 @@ class PaddleOCR:
         here either - the detected region changes on every frame, so a box
         drawn on the live view wouldn't mean anything to line staff.
 
-        dynamic=False (the plain "ocr" keyword-match mode) is unrelated to
-        OCRead and still uses the static cfg["roi"] box, via the shared roi
-        utility so the coordinate math isn't duplicated across web.py /
-        tesseract_ocr.py.
-
         Returns (crop, cycle_debug_dir). cycle_debug_dir is the same
         per-cycle folder text_locator.py just wrote its own debug images
-        into (None if dynamic_roi debug_save is off, or in the static-ROI
-        path, which has no equivalent) - _recognize() uses it to write the
+        into (None if dynamic_roi debug_save is off) - _recognize() uses it to write the
         actual OCR result alongside the localization debug images, so a
         debug capture shows both where the crop came from and what OCR did
         with it, instead of just the former.
         """
-        if dynamic:
-            if not self.dynamic_roi_enabled:
-                log.warning(
-                    "OCRead called with dynamic ROI disabled (ocr.dynamic_roi.enabled=false) - "
-                    "running OCR on the full frame. Enable it in config to locate text automatically."
-                )
-                self._last_located = None
-                return frame, None
-
-            located = locate_text_region(frame, self.dynamic_roi_cfg, debug_dir=self.dynamic_roi_debug_dir)
-            # Kept for OCRead's frame-region reads (read() -> _frame_variant_input).
-            self._last_located = located or None
-            if not located:
-                log.debug("Dynamic ROI: no text region found on this frame - running OCR on the full frame.")
-                return frame, None
-
-            cycle_debug_dir = located.get("cycle_debug_dir")
-            rotated_rect = located.get("rotated_rect")
-            # Extra margin here (beyond dynamic_roi.padding_px, which is
-            # already baked into rotated_rect) is specifically for
-            # PaddleOCR's own internal detector, which tends to need a bit
-            # of non-text margin around a region to reliably fire - a crop
-            # with characters right up against the edge is more likely to
-            # be missed by its detector even when a human would read it
-            # fine. This is separate from (and on top of) the tighter
-            # padding used for our own CV clustering, which stays as-is
-            # since loosening that risks pulling ribs back into detection.
-            crop = deskew_crop(frame, rotated_rect, extra_padding_px=20) if rotated_rect else None
-            if crop is None:
-                # Degenerate rotated rect (shouldn't normally happen) - use
-                # the axis-aligned box we already computed rather than the
-                # full frame, since we did find *something*.
-                x1, y1, x2, y2 = located["bbox"]
-                crop = frame[y1:y2, x1:x2]
-
-            return crop, cycle_debug_dir
-
-        # Static-ROI path: only reached from run() (the "ocr" keyword mode).
-        # read() (OCRead) always passes dynamic=True and never gets here.
-        roi = cfg.get("roi")
-        if not roi:
+        if not self.dynamic_roi_enabled:
+            log.warning(
+                "OCRead called with dynamic ROI disabled (ocr.dynamic_roi.enabled=false) - "
+                "running OCR on the full frame. Enable it in config to locate text automatically."
+            )
+            self._last_located = None
             return frame, None
 
-        if self.debug_draw_roi:
-            draw_roi(frame, roi)
+        located = locate_text_region(frame, self.dynamic_roi_cfg, debug_dir=self.dynamic_roi_debug_dir)
+        # Kept for OCRead's frame-region reads (read() -> _frame_variant_input).
+        self._last_located = located or None
+        if not located:
+            log.debug("Dynamic ROI: no text region found on this frame - running OCR on the full frame.")
+            return frame, None
 
-        return apply_roi(frame, roi), None
+        cycle_debug_dir = located.get("cycle_debug_dir")
+        rotated_rect = located.get("rotated_rect")
+        # Extra margin here (beyond dynamic_roi.padding_px, which is
+        # already baked into rotated_rect) is specifically for
+        # PaddleOCR's own internal detector, which tends to need a bit
+        # of non-text margin around a region to reliably fire - a crop
+        # with characters right up against the edge is more likely to
+        # be missed by its detector even when a human would read it
+        # fine. This is separate from (and on top of) the tighter
+        # padding used for our own CV clustering, which stays as-is
+        # since loosening that risks pulling ribs back into detection.
+        crop = deskew_crop(frame, rotated_rect, extra_padding_px=20) if rotated_rect else None
+        if crop is None:
+            # Degenerate rotated rect (shouldn't normally happen) - use
+            # the axis-aligned box we already computed rather than the
+            # full frame, since we did find *something*.
+            x1, y1, x2, y2 = located["bbox"]
+            crop = frame[y1:y2, x1:x2]
+
+        return crop, cycle_debug_dir
 
     def _write_ocr_result_debug(self, debug_dir, display_frame, candidates, elapsed_ms, extra_lines=None,
                                 name="ocr_result.png"):
@@ -545,7 +518,6 @@ class PaddleOCR:
         "region",        # generous box around the located text, OCR-pipeline preprocessing
         "region_dot",    # same box, dot_text (flat-field) preprocessing
         "full_frame",    # whole frame, OCR-pipeline preprocessing
-        "ocr_pipeline",  # exactly what the OCR pipeline reads: static cfg["roi"] box + its preprocessing
     }
     PREPROCESS_VARIANTS = CROP_VARIANTS | FRAME_VARIANTS
 
@@ -642,7 +614,7 @@ class PaddleOCR:
         profile_data = {}
         self._last_located = None
         t0 = time.perf_counter()
-        roi_frame, cycle_debug_dir = self._apply_roi(frame, dynamic=dynamic_roi)
+        roi_frame, cycle_debug_dir = self._apply_roi(frame)
         located = self._last_located if dynamic_roi else None
         profile_data["roi_ms"] = round((time.perf_counter() - t0) * 1000, 3)
 
@@ -663,11 +635,6 @@ class PaddleOCR:
 
     def _frame_variant_input(self, frame, located, variant):
         """Raw input for a FRAME_VARIANTS read (see there)."""
-        if variant == "ocr_pipeline":
-            # Reuse the OCR pipeline's own static-ROI crop, unmodified. A copy,
-            # because that path may draw its debug ROI box onto the frame.
-            crop, _ = self._apply_roi(frame.copy(), dynamic=False)
-            return self._downscale_roi(crop)
         if variant == "full_frame" or not located:
             return self._downscale_roi(frame)
         h, w = frame.shape[:2]
@@ -685,7 +652,7 @@ class PaddleOCR:
                 variant = "classic_derib"
             else:
                 variant = "classic"
-        if variant in ("region", "full_frame", "ocr_pipeline"):
+        if variant in ("region", "full_frame"):
             return self._preprocess_image(crop)  # OCR-pipeline preprocessing, unchanged
         if variant == "region_dot":
             return clean_dot_text(crop, dict(self.dot_text_cfg or {}, illumination="divide"))
@@ -871,59 +838,6 @@ class PaddleOCR:
             )
 
         return candidates, elapsed_ms, profile_data, engine_error
-
-    def run(self, frame, profile=False):
-        """
-        Executes OCR on the provided frame, applying ROI and preprocessing if configured.
-
-        Used by the OCR mode: recognized text is matched against the
-        configured/active keyword (and date pattern) here, and only matching
-        candidates are returned as detections.
-        """
-        candidates, elapsed_ms, profile_data, engine_error = self._recognize(frame, profile=profile)
-
-        keywords = (
-            [self.app_state.get_ocr_keyword()]
-            if self.app_state else self.keywords
-        )
-        keyword_set = {k.lower() for k in keywords if isinstance(k, str)} if self.app_state else self.keyword_set
-
-        t3 = time.perf_counter()
-        detections = []
-        for candidate in candidates:
-            text = candidate["text"]
-            word = text.lower()
-            if keyword_set and word not in keyword_set:
-                if self._date_pattern and not self._date_pattern.search(text):
-                    continue
-            detections.append(candidate)
-
-        if profile:
-            profile_data["filter_ms"] = round((time.perf_counter() - t3) * 1000, 3)
-            profile_data["total_ms"] = round(sum(v for v in profile_data.values() if isinstance(v, (int, float))), 3)
-
-        processing_time_ms = round(elapsed_ms, 1)
-        searched_word = keywords[0] if keywords else ""
-        log.debug(
-            "PaddleOCR run completed: processing_time_ms=%s candidates=%s detections=%s searched_word=%r",
-            processing_time_ms,
-            len(candidates),
-            len(detections),
-            searched_word,
-        )
-        result = {
-            "detections": detections,
-            "processing_time_ms": processing_time_ms,
-            "mode": "ocr",
-            "searched_word": searched_word
-        }
-        if engine_error:
-            result["error"] = engine_error
-
-        if profile:
-            result["_profile_ms"] = profile_data
-
-        return result
 
     def _read_with_font_reader(self, frame, profile=False):
         """OCRead with the trained dot-font reader (see font_reader.py)."""

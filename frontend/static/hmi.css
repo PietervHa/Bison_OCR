@@ -203,14 +203,6 @@ body {
 
 .mode-btn:hover { border-color: var(--steel); color: var(--white); }
 
-/* "selected" state uses inverted white fill, not red — red stays reserved
-   for alarm/caution only */
-.mode-btn.active {
-    background: var(--white);
-    color: #000;
-    border-color: var(--white);
-}
-
 .rotate-btn {
     margin-left: 10px;
     background: var(--panel);
@@ -234,42 +226,6 @@ body {
     color: var(--steel);
     letter-spacing: 0.5px;
 }
-
-.ocr-keyword-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-family: var(--font-body);
-    font-size: 13px;
-    color: var(--steel);
-}
-
-.ocr-keyword-row input {
-    font-family: var(--font-data);
-    font-size: 13px;
-    padding: 6px 10px;
-    background: var(--panel);
-    color: var(--white);
-    border: 1px solid var(--hairline);
-    border-radius: 3px;
-    width: 240px;
-}
-
-.ocr-keyword-row button {
-    padding: 6px 14px;
-    font-family: var(--font-body);
-    font-weight: 600;
-    font-size: 12px;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    background: var(--panel-raised);
-    color: var(--white);
-    border: 1px solid var(--hairline);
-    border-radius: 3px;
-    cursor: pointer;
-}
-
-.ocr-keyword-row button:hover { border-color: var(--steel); }
 
 /* Camera disconnected overlay */
 .camera-disconnected-overlay {

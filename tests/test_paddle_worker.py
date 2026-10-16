@@ -152,10 +152,6 @@ class PaddleOCRResultTests(unittest.TestCase):
         self.assertEqual(result["detections"], [])
         self.assertEqual(engine._paddle.calls, 1, "must not run the orientation retry after an engine failure")
 
-    def test_engine_failure_in_ocr_mode_sets_error_too(self):
-        engine = self._ocr(PaddleWorkerError("worker died"))
-        self.assertIn("error", engine.run(self._blank_frame()))
-
     def test_retry_failure_after_empty_first_pass_is_an_error(self):
         engine = self._ocr([], PaddleWorkerError("died on retry"))
         result = engine.read(self._blank_frame())
@@ -196,7 +192,7 @@ class VisionNormalizationTests(unittest.TestCase):
         except Exception as exc:  # torch/transformers not installed in this environment
             self.skipTest(f"backend.core.vision not importable here: {exc}")
         normalized = vision._normalize_result(
-            {"detections": [], "text": "", "mode": "ocread", "error": "worker died"}, "ocread"
+            {"detections": [], "text": "", "mode": "ocread", "error": "worker died"}
         )
         self.assertEqual(normalized["status"], "NOK")
         self.assertEqual(normalized["failure_reason"], "ocr_engine_error")
