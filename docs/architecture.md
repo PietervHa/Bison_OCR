@@ -5,11 +5,11 @@
 ```
             ┌──────────────── Web HMI (FastAPI + HTML/JS, port 5000) ───────────────┐
             │  /  /status  /result  /video_feed  /camera_status                     │
-            │  /maintenance_mode  /camera_rotation  /reset_counters                 │
+            │  /camera_rotation  /reset_counters                                    │
             └───────────────────────────────┬───────────────────────────────────────┘
                                             │
                               AppState (lock-protected)
-                     last result · counters · maintenance session · rotation
+                     last result · counters · rotation                      
                                             │
      ┌──────────────────┬───────────────────┼─────────────────────┐
      ▼                  ▼                   ▼                     ▼
@@ -101,12 +101,6 @@ A NOK result has `"status": "NOK"` and a `failure_reason`. A technical failure a
 | `vision_start_failed` | TCP trigger, but the read could not be started |
 | `vision_timeout` | TCP trigger, no result within `trigger.timeout_s` |
 
-## Maintenance mode
+## Camera rotation and counter reset
 
-`POST /maintenance_mode` with `{"maintenance_mode": true, "password": "..."}`:
-
-- `MAINTENANCE_PASSWORD` (from `.env` or the environment) not set or empty: 403, maintenance stays locked.
-- Wrong password: 403 after about 1 s. The comparison uses `secrets.compare_digest`.
-- Right password: maintenance on, and an httponly session cookie `maintenance_session` (30 min). `/camera_rotation` and `/reset_counters` require that cookie.
-
-`{"maintenance_mode": false}` leaves maintenance mode and clears the session.
+`POST /camera_rotation` and `POST /reset_counters` need no login. The HMI asks for confirmation before resetting the counters.

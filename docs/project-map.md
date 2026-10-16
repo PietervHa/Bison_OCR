@@ -7,7 +7,7 @@ Bison_OCR/
 │   ├── core/
 │   │   ├── camera.py               # capture worker + supervisor, reconnect, device lookup by name
 │   │   ├── config_loader.py        # loads config/default.yaml (or --config) and .env -> cfg
-│   │   ├── state.py                # AppState: last result, counters, maintenance session, rotation
+│   │   ├── state.py                # AppState: last result, counters, rotation
 │   │   ├── tcp_trigger_server.py   # PLC trigger byte in, code text / NOK out
 │   │   └── vision.py               # runs OCRead in a worker thread, decides OK/NOK
 │   ├── detection/
@@ -27,7 +27,7 @@ Bison_OCR/
 │       ├── logger.py               # console + data/logs/vision.log
 │       └── roi.py                  # fractional ROI -> pixels (text locator search region)
 ├── frontend/
-│   ├── web.py                      # FastAPI app: HMI routes, video stream, maintenance password
+│   ├── web.py                      # FastAPI app: HMI routes, video stream
 │   ├── templates/hmi.html
 │   └── static/                     # hmi.js, dialogs.js, hmi.css, img/
 ├── QC_tools/
@@ -38,7 +38,6 @@ Bison_OCR/
 ├── tests/                          # unittest suite + fixtures/font_reader/*.png, camera_test.py (manual)
 ├── docs/                           # this documentation + VisionLinkTest.st (PLC side)
 ├── data/                           # runtime only, not in git: results/, logs/, debug/
-├── .env.example                    # MAINTENANCE_PASSWORD
 └── requirements.txt
 ```
 
@@ -47,10 +46,9 @@ Bison_OCR/
 | Route | Auth | Purpose |
 |---|---|---|
 | `GET /` | – | HMI page |
-| `GET /status` | – | maintenance flag for this browser, machine id |
+| `GET /status` | – | machine id |
 | `GET /result` | – | last result and counters |
 | `GET /video_feed` | – | MJPEG live stream |
 | `GET /camera_status` | – | camera connected flag |
-| `POST /maintenance_mode` | password | enter/leave maintenance mode |
-| `POST /camera_rotation` | maintenance | rotate the image 90° |
-| `POST /reset_counters` | maintenance | reset OK/NOK/total |
+| `POST /camera_rotation` | – | rotate the image 90° |
+| `POST /reset_counters` | – | reset OK/NOK/total (HMI asks for confirmation) |

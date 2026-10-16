@@ -1,38 +1,11 @@
-import os
-import secrets
 import cv2
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 from pathlib import Path
 from backend.core.config_loader import cfg
 import time
-
-
-# Seconds a wrong maintenance password is held before the reply goes out,
-# to slow down guessing.
-_WRONG_PASSWORD_DELAY_S = 1.0
-
-
-def _maintenance_password() -> str:
-    """The maintenance password from MAINTENANCE_PASSWORD (.env or the
-    environment). Empty means not configured: maintenance stays locked."""
-    return os.environ.get("MAINTENANCE_PASSWORD", "")
-
-
-def _wrong_password_delay() -> None:
-    time.sleep(_WRONG_PASSWORD_DELAY_S)
-
-
-# --- Request bodies -------------------------------------------------------
-# Pydantic models replace Flask's `request.json or {}` pattern. Defaults
-# mirror the old `data.get(key, default)` calls exactly.
-
-class MaintenanceModeBody(BaseModel):
-    maintenance_mode: bool = False
-    password: str = ""
 
 
 def create_app(camera, app_state) -> FastAPI:
@@ -53,12 +26,6 @@ def create_app(camera, app_state) -> FastAPI:
 
     JPEG_QUALITY = int(cfg.get("hmi", {}).get("stream_quality", 75))
 
-    def _is_maintenance_access(request: Request) -> bool:
-        if not app_state.get_maintenance_mode():
-            return False
-
-        cookie_token = request.cookies.get("maintenance_session", "")
-        return bool(cookie_token) and cookie_token == app_state.get_maintenance_session_token()
 
     def generate_frames():
         if not cfg["hmi"]["enable_video_feed"]:
@@ -105,7 +72,7 @@ def create_app(camera, app_state) -> FastAPI:
 
     # Applied to the index page and the /status auth check so that no
     # browser, proxy, or embedded kiosk webview caches a response that
-    # reflects maintenance access. Without this, some webviews can satisfy
+    # reflects the current state. Without this, some webviews can satisfy
     # a back-button navigation straight from disk/HTTP cache instead of
     # hitting the network, bypassing the pageshow/bfcache reload in hmi.js.
     _NO_STORE_HEADERS = {
@@ -121,9 +88,7 @@ def create_app(camera, app_state) -> FastAPI:
     @app.get("/status")
     def get_status(request: Request, response: Response):
         response.headers.update(_NO_STORE_HEADERS)
-        is_maintenance = _is_maintenance_access(request)
         return {
-            "maintenance_mode": is_maintenance,
             "machine_id": cfg["machine_id"],
             "version": "1.0.0",
         }
@@ -132,51 +97,9 @@ def create_app(camera, app_state) -> FastAPI:
     def get_result():
         return app_state.get_snapshot()
 
-    @app.post("/maintenance_mode")
-    def set_maintenance_mode(body: MaintenanceModeBody, request: Request, response: Response):
-        # Entering maintenance mode requires the single password from
-        # MAINTENANCE_PASSWORD. When it isn't configured, maintenance mode
-        # stays locked - it is never open by default.
-        if body.maintenance_mode:
-            expected = _maintenance_password()
-            if not expected:
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "error": "not_configured",
-                        "message": "Maintenance mode is locked: MAINTENANCE_PASSWORD is not set.",
-                    },
-                )
-
-            if not secrets.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8")):
-                _wrong_password_delay()
-                return JSONResponse(
-                    status_code=403,
-                    content={"error": "invalid_password", "message": "Incorrect password."},
-                )
-
-            session_token = secrets.token_urlsafe(24)
-            app_state.set_maintenance_mode(True)
-            app_state.set_maintenance_session_token(session_token)
-            response.set_cookie(
-                "maintenance_session",
-                session_token,
-                httponly=True,
-                samesite="lax",
-                max_age=60 * 30,
-                path="/",
-            )
-            return {"maintenance_mode": True}
-
-        app_state.set_maintenance_mode(False)
-        app_state.set_maintenance_session_token("")
-        response.delete_cookie("maintenance_session", path="/")
-        return {"maintenance_mode": False}
 
     @app.post("/camera_rotation")
     def rotate_camera(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
         app_state.rotate_camera()
         return {"camera_rotation": app_state.get_camera_rotation()}
 
@@ -196,8 +119,6 @@ def create_app(camera, app_state) -> FastAPI:
 
     @app.post("/reset_counters")
     def reset_counters(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
         app_state.reset_counters()
         return {"status": "counters reset"}
 

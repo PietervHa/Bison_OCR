@@ -2,14 +2,6 @@
 
 All settings are in `config/default.yaml`. Start with `--config <path>` to use another file. `default.yaml` itself has the detailed comments and the measurements behind the values. This page is the overview.
 
-## Secrets (`.env`)
-
-| Variable | Meaning |
-|---|---|
-| `MAINTENANCE_PASSWORD` | Password for maintenance mode on the HMI. Not set or empty: maintenance mode stays locked. |
-
-`.env` lives in the project root and is not committed (see `.env.example`).
-
 ## Top level
 
 | Key | Default | Meaning |

@@ -6,7 +6,7 @@
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-pip install pyflakes httpx      # dev only: lint + the maintenance-password tests
+pip install pyflakes httpx      # dev only: lint + the web tests
 ```
 
 Run everything from the project root. Config paths such as `data/results` and `debug_dir` are resolved relative to the project root, not the working directory.
@@ -26,7 +26,7 @@ python -m pyflakes backend frontend QC_tools tests
 | `test_ocread_deskew.py` | text locator and deskew orientation |
 | `test_integration_vision_pipeline.py` | `run_vision` status rules (sync and callback), JSONL writer |
 | `test_tcp_trigger_ocread.py` | PLC response: code text, line breaks, length limit, NOK |
-| `test_maintenance_password.py` | locked when unset, refused when wrong, unlocked when right (needs httpx) |
+| `test_web_controls.py` | camera rotation and counter reset work without login; no maintenance route (needs httpx) |
 | `test_camera_device_lookup.py`, `test_camera_recovery.py` | device lookup by name, reconnect and frozen-frame handling (fake camera) |
 | `test_qc_tools.py` | session report, project-relative paths |
 | `test_unit_core.py` | AppState counters and snapshot |
