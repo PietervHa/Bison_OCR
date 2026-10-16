@@ -1,6 +1,8 @@
-# VisionSoftwareMDE
+# Bison OCR – OCRead
 
-Machine vision system for automated visual inspection on the MDE Automation production line. The system combines OCR and object detection to assess products (OK/NOK) and communicates the result via a web dashboard and optionally via a TCP connection with the PLC.
+Reads the dot-printed code on bottle caps (e.g. `4113 08:26` / `BB 05/26`) on the MDE Automation production line. A camera frame goes through a classical-CV text locator and a classifier trained on the printer's dot font (the "font reader"). The read is then checked against the print format. The result goes to the PLC over TCP and is shown on a web HMI.
+
+A read is either a validated code or an explicit NOK with a reason. A rejected read never shows or sends a guessed code.
 
 ---
 
@@ -8,36 +10,25 @@ Machine vision system for automated visual inspection on the MDE Automation prod
 
 - Windows 10/11
 - Python 3.10+
-- Tesseract-OCR installed at `C:/Program Files/Tesseract-OCR/tesseract.exe`
-- Webcam or industrial camera (USB)
+- USB camera (configured for a DFK 22BUC03; set `camera.device_name`)
 
 ---
 
 ## Installation
 
 ```powershell
-git clone <repo-url>
-cd VisionSoftwareMDE
-
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` in the project root and replace the placeholder value before starting the application:
+Copy `.env.example` to `.env` in the project root and set the maintenance password:
 
 ```dotenv
-ROBOFLOW_API_KEY=your_key_here
+MAINTENANCE_PASSWORD=choose-a-password
 ```
 
-Maintenance-mode access is per-user rather than a shared password. Create the first account with:
-
-```powershell
-python -m QC_tools.manage_users add <username>
-```
-
-You'll be prompted for a password (entered via `getpass`, not shown on screen). See `docs/configuration.md` for the full set of commands (`add`, `passwd`, `list`, `remove`, `logins`).
+If `MAINTENANCE_PASSWORD` is not set (or empty), maintenance mode stays locked.
 
 ---
 
@@ -45,74 +36,78 @@ You'll be prompted for a password (entered via `getpass`, not shown on screen). 
 
 ```powershell
 python -m backend.main
+# or with another config file:
+python -m backend.main --config path\to\config.yaml
 ```
 
-The dashboard is available at `http://localhost:5000`.  
-Press `Q` in the terminal to manually start an inspection cycle.
+- HMI: `http://localhost:5000`
+- PLC trigger server: TCP port `5001` (when `trigger.enabled: true`)
+- Press `Q` (global keyboard hook) to trigger a read by hand.
 
 ---
 
-## Configuration
+## Pipeline
 
-All settings are in `config/default.yaml`. The most relevant options:
+```
+camera frame
+  -> text locator (backend/detection/ocr/text_locator.py)   finds the print, strips rib lines
+  -> deskewed crop + optional downscale
+  -> font reader (backend/detection/ocr/font_reader.py)     dot_text.py cleanup + trained classifier
+  -> format check (backend/detection/ocr/code_validator.py) template + value_pattern
+  -> result (mode "ocread")
+```
 
-| Setting | Description |
-|---|---|
-| `vision_mode` | `"ocr"` or `"object_detection"` |
-| `object_detection.backend` | `"classifier"`, `"yolo"`, `"template"` or `"roboflow"` |
-| `camera.index` | Camera number (0 = first USB camera) |
-| `roi` | Region of interest as normalised coordinates (0–1) |
-| `trigger.enabled` | `true` to activate TCP connection with PLC |
-| `ocr.keywords` | Text that must be recognised for an OK result |
-
-For the Roboflow backend: store the API key as an environment variable (`ROBOFLOW_API_KEY`) and reference it in the config, so the key is not stored in the repository.
-
-For maintenance functions: accounts are managed with `python -m QC_tools.manage_users` (see `docs/configuration.md`), not a config value.
+The orchestration is `OCRead.read(frame)` in `backend/detection/ocread/engine.py`. `backend/core/vision.py` runs it in a worker thread and decides OK/NOK.
 
 ---
-
-## Project structure
-
-```
-VisionSoftwareMDE/
-├── backend/
-│   ├── core/           # Camera, vision engine, AppState, TCP trigger
-│   ├── detection/      # OCR and object detection implementations
-│   └── output/         # Result storage (JSONL)
-├── frontend/           # Web dashboard (Flask + HTML/JS)
-├── config/             # Configuration file (YAML)
-├── data/
-│   ├── results/        # Inspection results per day (JSONL)
-│   ├── templates/      # Reference images for template matching
-│   └── logs/           # Log files
-├── models/             # Trained models (classifier, YOLO)
-├── benchmarks/         # Speed measurement OCR and object detection
-├── tests/              # Test scripts
-└── docs/               # Extended documentation
-```
 
 ## PLC connection (TCP)
-
-Enable in `config/default.yaml`:
 
 ```yaml
 trigger:
   enabled: true
   port: 5001
   trigger_byte: "0x01"
+  timeout_s: 15.0
+  max_text_length: 64
 ```
 
-The PLC sends byte `0x01` → the system runs an inspection cycle → the PLC receives `OK\n` or `NOK\n`.
+The PLC sends the trigger byte and the system runs one read. On OK the PLC receives the code text plus a newline, e.g. `4113 08:26 BB 05/26\n`. On anything else it receives `NOK\n`: a rejected read, no camera frame, a timeout, or a read longer than `max_text_length`. The PLC compares the code with the expected value itself.
 
 ---
 
 ## Results
 
-Inspection results are stored per day in `data/results/` as JSONL files:
+Every read is appended to `data/results/<date>.jsonl`, for example:
 
 ```json
-{"timestamp": "2026-06-04T10:30:45", "status": "OK", "confidence": 0.95, "cycle_time_ms": 125}
+{"text": "4113 08:26 BB 05/26", "status": "OK", "mode": "ocread", "confidence": 0.99,
+ "detections": [...], "validation": {...}, "processing_time_ms": 412.3, "cycle_time_ms": 420.1,
+ "timestamp": "2026-10-13T09:43:03.123456"}
 ```
+
+A NOK result also has `failure_reason` (see `docs/architecture.md`). Logs are written to `data/logs/vision.log`.
+
+---
+
+## QC tools
+
+```powershell
+python -m QC_tools.q_trigger --max-triggers 100        # send TCP triggers like the PLC
+python -m QC_tools.ocread_session_report --expected "4113 08:26 BB 05/26"   # report from today's JSONL
+python -m QC_tools.camera_stability --seconds 30 --label locked              # exposure stability check
+```
+
+---
+
+## Testing
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+python -m pyflakes backend frontend QC_tools tests
+```
+
+The maintenance-password tests use FastAPI's `TestClient`. They are skipped when `httpx` is not installed (`pip install httpx` to run them).
 
 ---
 
@@ -120,33 +115,9 @@ Inspection results are stored per day in `data/results/` as JSONL files:
 
 | Document | Contents |
 |---|---|
-| `docs/architecture.md` | System architecture, threading model and data flow |
-| `docs/configuration.md` | All configuration options in detail |
-| `docs/development.md` | Extending and debugging; debugging instructions |
-| `docs/classifier-and-object-detection.md` | Model training and backend selection (classifier, YOLO, Roboflow, template) |
-| `docs/project-map.md` | Complete project overview with all modules and functions |
-| `docs/roadmap.md` | Future improvements and plans |
-
----
-
-## Testing
-
-Unit tests and integration tests run with:
-
-```powershell
-# All tests
-python -m unittest discover -s tests -p "test_*.py"
-
-# Specific test module
-python -m unittest tests.test_unit_core
-python -m unittest tests.test_integration_vision_pipeline
-```
-
-Existing tests:
-- `tests/test_unit_core.py` – Unit tests for `AppState` and `InspectionEngine`
-- `tests/test_integration_vision_pipeline.py` – Integration tests for the vision pipeline and result storage
-- `tests/test_inspection_pipeline.py` – Legacy manual tests with validation
-
----
-
-*Developed during graduation internship at MDE Automation, February–June 2026.*
+| `docs/architecture.md` | Components, threads, data flow, result contract, failure reasons |
+| `docs/configuration.md` | Every configuration key |
+| `docs/development.md` | Tests, QC tools, debug captures, changing the print template |
+| `docs/project-map.md` | Files and what they do |
+| `docs/roadmap.md` | Open items |
+| `docs/VisionLinkTest.st` | PLC-side test program (Structured Text) |

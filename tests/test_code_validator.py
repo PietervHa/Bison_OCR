@@ -43,7 +43,7 @@ class TemplateTests(unittest.TestCase):
 
     def test_digit_is_never_changed_into_another_digit(self):
         # 08:25 fits the format - the validator alone cannot know it should
-        # be 08:26 (that is what consensus is for), but it must not alter it.
+        # be 08:26 (the PLC's comparison catches that), but it must not alter it.
         r = T().validate(toks("4113 08:25", "BB 05/26"))
         self.assertEqual(r["text"], "4113 08:25 BB 05/26")
 

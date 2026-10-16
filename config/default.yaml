@@ -1,5 +1,5 @@
-# Vision Software Configuration
-# Default configuration for the machine vision application
+# OCRead configuration
+# Default configuration for the bottle-cap code reader
 
 # Top-level settings
 machine_id: "default"
@@ -254,20 +254,9 @@ web:
 output:
   result_dir: "data/results"
 
-# Trigger settings
-# Automated long-running Q trigger for vision testing
-# Disabled by default so normal application startup is unchanged.
-trigger_test:
-  enabled: true
-  startup_delay_s: 30.0
-  interval_s: 1.0
-  max_hours: 8.0
-  max_images: 10000
-
-# Trigger settings
+# TCP trigger settings (PLC)
 trigger:
   enabled: true         # Set to true to activate TCP trigger listener
-  type: "tcp"
   host: "0.0.0.0"     # Local-only; change to 0.0.0.0 for a real PLC on the network
   port: 5001
   trigger_byte: "0x01"  # Byte the PLC sends to trigger a vision cycle

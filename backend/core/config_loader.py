@@ -1,9 +1,10 @@
 """
 Configuration Loader
 
-This module handles loading and validating the application's configuration from 
-YAML files and environment variables. It provides a global `cfg` dictionary 
-used throughout the project.
+This module loads the application's configuration from a YAML file
+(config/default.yaml, or --config <path>) and loads the project root .env
+file into the environment (MAINTENANCE_PASSWORD). It provides a global
+`cfg` dictionary used throughout the project.
 """
 
 import sys

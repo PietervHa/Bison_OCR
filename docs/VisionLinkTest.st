@@ -3,8 +3,7 @@
   Omron NJ/NX, Sysmac Studio, Structured Text
 
   The PLC is the TCP CLIENT, the vision PC is the server on port 5001.
-  Protocol as implemented in backend/core/tcp_trigger_server.py
-  with vision_mode: "ocread":
+  Protocol as implemented in backend/core/tcp_trigger_server.py:
 
      PLC -> PC   1 byte 16#01                trigger one vision cycle
      PC  -> PLC  '<text that was read>' LF   read OK, PLC compares the text

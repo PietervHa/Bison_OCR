@@ -1,191 +1,112 @@
-# Architecture Guide
+# Architecture
 
----
-
-## System overview
+## Components
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Web Dashboard                         │
-│                    (Flask + HTML/JavaScript)                 │
-└────────────────────┬────────────────────────────────────────┘
-                     │ HTTP/JSON
-┌─────────────────────▼────────────────────────────────────────┐
-│                    Frontend Layer                             │
-│  (web.py — /video_feed, /status, /threshold endpoints)      │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────────┐
-│                   Application State (AppState)               │
-│              shared across threads, lock-protected           │
-└────────────────┬─────────────────────────────────────────────┘
-                │
-    ┌───────────┼──────────────┐
-    ▼           ▼              ▼
-┌──────────┐ ┌─────────────┐ ┌──────────────────────┐
-│  Camera  │ │Vision Engine│ │ TCP Trigger Server   │
-│          │ │             │ │ (optional, port 5001)│
-│ captures │ │ • OCR       │ │                      │
-│ frames   │ │ • Detection │ │ PLC → trigger byte   │
-│ in bg    │ │ • Inference │ │ server → OK/NOK      │
-└──────────┘ └─────────────┘ └──────────────────────┘
+            ┌──────────────── Web HMI (FastAPI + HTML/JS, port 5000) ───────────────┐
+            │  /  /status  /result  /video_feed  /camera_status                     │
+            │  /maintenance_mode  /camera_rotation  /reset_counters                 │
+            └───────────────────────────────┬───────────────────────────────────────┘
+                                            │
+                              AppState (lock-protected)
+                     last result · counters · maintenance session · rotation
+                                            │
+     ┌──────────────────┬───────────────────┼─────────────────────┐
+     ▼                  ▼                   ▼                     ▼
+  Camera           Q-key loop        TCP trigger server     result_writer
+ (capture +        (main thread)     (PLC, port 5001)       data/results/<date>.jsonl
+  reconnect)             │                   │
+                         └──── run_vision ───┘
+                               (backend/core/vision.py, 1 worker thread)
+                                        │
+                               OCRead.read(frame)
+                         (backend/detection/ocread/engine.py)
 ```
 
----
-
-## Threading model
-
-The application runs five concurrent threads:
+## Threads
 
 | Thread | Role |
-|--------|------|
-| Main | Vision trigger loop — waits for Q key or TCP trigger, calls `run_vision()` |
-| Web server | Flask on port 5000 — serves dashboard, video stream, API |
-| Vision workers | ThreadPoolExecutor — runs inference in background, fires callback when done |
-| TCP trigger (optional) | Listens for PLC connections on port 5001 |
-| Camera | Continuously captures frames into a single-frame buffer |
+|---|---|
+| Main | `vision_trigger_loop`: waits for the `Q` key and starts a read |
+| Web server | uvicorn serving `frontend/web.py` |
+| Vision worker | single-thread pool in `vision.py`: runs `OCRead.read` and calls back with the normalised result |
+| TCP trigger | accepts the PLC connection, reads trigger bytes, waits for the result, answers |
+| Camera | capture worker and supervisor (stall/frozen-frame detection, reconnect by device name) |
 
-`AppState` uses `threading.Lock` for all shared state. A `threading.Event` flag prevents overlapping vision cycles.
+`AppState` guards all shared state with a lock. The Q-key loop uses a `threading.Event` so key presses don't overlap reads.
 
----
+## One read
 
-## Vision cycle — data flow
+1. **Trigger**: the PLC sends the trigger byte, or someone presses `Q`.
+2. **Frame**: the latest frame from the camera. If there is no frame, the TCP server records `camera_unavailable` and answers `NOK`.
+3. **Locate** (`text_locator.locate_text_region`): blackhat ink map, long rib lines erased, components clustered into the text block. Returns a rotated rect, or `None` (then the full frame is read).
+4. **Crop** (`text_locator.deskew_crop`): straightened crop with 20 px extra margin. Then `ocr.downscale`/`min_dim` (no-op for today's crop size).
+5. **Font reader** (`font_reader.FontReader.read`): `dot_text.clean_dot_text` cleanup, grid segmentation, classifier per character cell, both orientations tried. Returns lines, text, `literal_score` and the lowest digit confidence, or `None`.
+6. **Validate**:
+   - Reject if `literal_score < min_literal_score` (`format_mismatch`).
+   - Reject if digit confidence `< min_digit_confidence` (`low_confidence`).
+   - Otherwise the template check (`CodeTemplate.validate`: format and `value_pattern`) decides.
+7. **Result**: built by the engine and normalised in `vision._normalize_result`. A rejected read always has `text == ""` and `detections == []`.
+8. **Record**: `main._process_vision_result` adds `cycle_time_ms`, updates AppState and counters, and appends to the JSONL file.
+9. **Answer**: the TCP server sends the code text plus `\n` on OK, otherwise `NOK\n`.
 
-```
-1. TRIGGER (Q key or TCP byte from PLC)
-   ↓
-2. CAPTURE latest frame from camera buffer
-   ↓
-3. VISION WORKER (background thread)
-   ├─ Extract ROI from frame
-   ├─ Preprocess image
-   ├─ Run inference (OCR or object detection)
-   └─ InspectionEngine → OK / NOK / ERROR
-   ↓
-4. RESULT CALLBACK
-   ├─ Update AppState (counters, last result)
-   ├─ Save JSONL to data/results/
-   └─ Log to data/logs/
-   ↓
-5. Dashboard updates / TCP client receives OK or NOK
+With `ocr.dynamic_roi.debug_save: true`, each read writes a folder `data/debug/dynamic_roi/<timestamp>/` containing:
 
-Typical cycle time: 50–300 ms depending on model and hardware.
-```
+- `text_locator_*.png`
+- `crop_raw_preprocess.png`
+- `font_reader.txt`, the read summary, including the rejected decode, which is never shown elsewhere
 
----
-
-## Key modules
-
-### `backend/core/state.py` — `AppState`
-
-Single shared object holding all runtime state: vision mode, confidence threshold, OK/NOK/error counters, last result, classifier load status. All reads and writes go through a threading lock.
-
-### `backend/core/vision.py`
-
-Orchestrates the vision pipeline. Routes to OCR or object detection based on config, manages model loading, dispatches work to the ThreadPoolExecutor, and fires the result callback.
-
-Key functions:
-- `bind_app_state(app_state)` — called once at startup
-- `run_vision(frame, callback)` — triggers async vision cycle
-
-### `backend/core/inspection_engine.py` — `InspectionEngine`
-
-Translates raw detection output (confidence, labels, boxes) into a final OK / NOK / ERROR verdict by comparing against the active confidence threshold.
-
-### `backend/core/tcp_trigger_server.py` — `TCPTriggerServer`
-
-Listens on the configured TCP port. On receipt of the trigger byte, calls `run_vision()`, waits for the result (up to `timeout_s`), and sends `OK\n` or `NOK\n` back to the PLC.
-
-### `backend/detection/ocr/`
-
-Two interchangeable engines — Tesseract and PaddleOCR — behind a common interface. Both extract ROI, preprocess the image, run OCR, then match against keywords and date regex. Debug frames are written to `debug_ocr/`.
-
-### `backend/detection/objectdetection/`
-
-Three interchangeable backends behind a common interface:
-
-| Backend | How it works |
-|---------|-------------|
-| `classifier` | Local HuggingFace image-classification pipeline (PyTorch) |
-| `yolo` | Local Ultralytics YOLO `.pt` model |
-| `template` | OpenCV template matching against reference images |
-| `roboflow` | REST call to Roboflow hosted inference workflow |
-
-### `backend/output/result_writer.py`
-
-Appends each inspection result as a JSON line to `data/results/YYYY-MM-DD.jsonl`. Result format:
+## Result contract
 
 ```json
 {
-  "timestamp": "2026-06-04T10:30:45.123456",
-  "vision_mode": "object_detection",
+  "mode": "ocread",
   "status": "OK",
-  "confidence": 0.95,
-  "confidence_threshold": 0.8,
-  "cycle_time_ms": 125.4,
-  "detections": [{"class": "ok", "confidence": 0.98, "box": [100, 200, 350, 450]}]
+  "text": "4113 08:26 BB 05/26",
+  "detections": [{"text": "4113 08:26", "confidence": 0.99}, {"text": "BB 05/26", "confidence": 0.99}],
+  "confidence": 0.99,
+  "validation": {"accepted": true, "reason": null, "fusion": null,
+                 "reads": [{"variant": "font_reader", "accepted": true, "reason": null,
+                            "text": "4113 08:26 BB 05/26", "raw_text": "4113 08:26 BB 05/26",
+                            "min_token_confidence": 0.99, "literal_score": -0.2,
+                            "timings_ms": {}, "orientation": "normal"}]},
+  "processing_time_ms": 412.3,
+  "cycle_time_ms": 420.1,
+  "timestamp": "2026-10-13T09:43:03.123456"
 }
 ```
 
----
+A NOK result has `"status": "NOK"` and a `failure_reason`. A technical failure also has `"error"`.
 
-## State diagram
+## Status rules (`vision._normalize_result`)
 
-```
-[IDLE]
-  │
-  ├─ Q key / TCP trigger
-  ▼
-[CAPTURING FRAME]
-  ▼
-[VISION_BUSY — flag set]
-  │  background thread: preprocess → inference → inspection engine
-  ▼
-[RESULT CALLBACK — update state, save, log]
-  ▼
-[VISION_BUSY — flag cleared]
-  ▼
-[IDLE — ready for next trigger]
-```
+| Condition | Status | `failure_reason` |
+|---|---|---|
+| `error` set (exception, missing frame, font reader unavailable) | NOK | `ocr_engine_error` |
+| `validation.accepted` is false | NOK | the validation reason |
+| no text and no detections | NOK | `no_text_detected` |
+| otherwise | OK | – |
 
----
+## Failure reasons
 
-## Performance reference
+| Reason | Meaning |
+|---|---|
+| `no_text_detected` | no print found on the frame and nothing readable |
+| `format_mismatch` | print found, but the read doesn't fit the template (or `literal_score` too low) |
+| `low_confidence` | a digit below `min_digit_confidence` |
+| `invalid_value` | fits the format but fails `value_pattern` (e.g. hour 27, month 13) |
+| `ocr_engine_error` | the read itself failed: exception, no frame (Q-key path), or font reader unavailable |
+| `text_too_long` | OK read longer than `trigger.max_text_length` bytes; sent as NOK |
+| `camera_unavailable` | TCP trigger, but the camera had no frame |
+| `vision_start_failed` | TCP trigger, but the read could not be started |
+| `vision_timeout` | TCP trigger, no result within `trigger.timeout_s` |
 
-| Step | Typical time share |
-|------|--------------------|
-| Inference (classifier / YOLO) | 60–80% of cycle (50–200 ms) |
-| OCR preprocessing | 10–20% of cycle (50–200 ms) |
-| Frame capture | 5–10% of cycle |
+## Maintenance mode
 
-To reduce cycle time: shrink the ROI, switch to a smaller model (`yolov8n` vs `yolov8m`), set `ocr.preprocess: "fast"`, or enable GPU (see Roadmap).
+`POST /maintenance_mode` with `{"maintenance_mode": true, "password": "..."}`:
 
----
+- `MAINTENANCE_PASSWORD` (from `.env` or the environment) not set or empty: 403, maintenance stays locked.
+- Wrong password: 403 after about 1 s. The comparison uses `secrets.compare_digest`.
+- Right password: maintenance on, and an httponly session cookie `maintenance_session` (30 min). `/camera_rotation` and `/reset_counters` require that cookie.
 
-## Error handling
-
-| Error type | Behaviour |
-|------------|-----------|
-| Vision processing exception | Caught in trigger loop, logged with stack trace, result set to `ERROR`, flag cleared, app continues |
-| Configuration error at startup | Logged and app exits with message |
-| Camera failure | Logged, frame returns `None`, vision cycle skipped |
-
----
-
-## Extending the system
-
-### Add a new detection backend
-
-1. Create a class in `backend/detection/objectdetection/` with a `detect(frame, roi_coords)` method that returns `{status, confidence, detections}`.
-2. Register it in `backend/core/vision.py` — add a branch in the backend dispatcher.
-3. Add a config section in `config/default.yaml`.
-
-### Add a new OCR engine
-
-1. Implement in `backend/detection/ocr/` matching the interface of `tesseract_ocr.py`.
-2. Add a branch in the OCR dispatcher.
-3. Add any engine-specific config keys under `ocr:` in `default.yaml`.
-
-### Change result storage
-
-Replace or extend `backend/output/result_writer.py`. The callback in `vision.py` passes the full result dict — redirect it to a database, webhook, or any other sink without touching the rest of the pipeline.
+`{"maintenance_mode": false}` leaves maintenance mode and clears the session.

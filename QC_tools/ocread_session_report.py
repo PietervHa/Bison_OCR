@@ -7,10 +7,11 @@ Shows:
   - OK / NOK counts and the reject reasons
   - cycle and processing times (median / 90th percentile / max)
   - with --expected: correct OK / WRONG OK / rejected
-  - for each preprocessing variant (read validation): how often its read fit
-    the format, why it didn't, and how often it agreed with the final code
-  - the confidence of reads that agreed with the final code, to set
-    ocr.read_validation.min_confidence
+  - per read variant (the font reader records "font_reader"): how often its
+    read fit the format, why it didn't, and how often it agreed with the
+    final code
+  - the lowest digit confidence of reads that agreed with the final code, to
+    set ocr.read_validation.font_reader.min_digit_confidence
   - the most common reads of rejected bottles
 
 Usage (from the repo root):
@@ -127,7 +128,7 @@ def summarize(rows, expected=None) -> str:
         if agree_conf:
             p(f"Confidence of reads that agreed: min {min(agree_conf):.3f}   p5 {_pct(agree_conf, 5):.3f}   "
               f"median {_pct(agree_conf, 50):.3f}")
-            p("  -> ocr.read_validation.min_confidence should sit below the p5 value.")
+            p("  -> ocr.read_validation.font_reader.min_digit_confidence should sit below the p5 value.")
 
     nok_reads = collections.Counter(r.get("text") or "" for r in rows if r.get("status") != "OK")
     if nok_reads:
