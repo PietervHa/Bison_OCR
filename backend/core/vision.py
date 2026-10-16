@@ -1,14 +1,14 @@
 """
 Vision Orchestration Module
 
-This module serves as the primary entry point for vision tasks, running the OCR
-engine on a frame and managing the communication with the application state.
+This module is the entry point for vision tasks: it runs the OCRead engine
+(backend/detection/ocread/engine.py) on a frame and turns its result into an
+OK/NOK status.
 """
 
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
-from backend.detection.ocr import OCR
+from backend.detection.ocread.engine import MODE, OCRead
 from backend.utils.logger import get_logger
 import time
 
@@ -16,11 +16,6 @@ logger = get_logger(__name__)
 
 # Global instances managed by this module
 ocr_instance = None
-_app_state: Optional[Any] = None
-
-# Every result produced by this module carries this mode tag; the TCP
-# trigger server and the HMI key on it.
-MODE = "ocread"
 
 # A single-threaded pool to process vision tasks sequentially without blocking the main loop
 _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision_worker")
@@ -28,21 +23,17 @@ _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision_worker")
 
 def bind_app_state(app_state) -> None:
     """
-    Connects the vision module to the application state and initializes the OCR engine.
+    Initializes the OCRead engine. app_state is accepted for the caller's
+    convenience; the engine itself needs no application state.
     """
-    global ocr_instance, _app_state
-    _app_state = app_state
-    ocr_instance = OCR(app_state=app_state)
-    if hasattr(ocr_instance, "warmup"):
-        ocr_instance.warmup()
+    global ocr_instance
+    ocr_instance = OCRead()
 
 
 def _normalize_detections(result: dict) -> list:
     """
-    Ensures that detection results have a consistent format across different backends.
+    Ensures that detections are always a list of dicts.
     """
-    # Every backend should expose detections in a consistent list shape so the
-    # UI and PLC logic do not need backend-specific branches.
     detections = result.get("detections")
     if isinstance(detections, list):
         normalized = [d for d in detections if isinstance(d, dict)]
@@ -103,7 +94,7 @@ def _normalize_result(result: dict) -> dict:
         normalized["status"] = "NOK"
         normalized.setdefault("failure_reason", "ocr_engine_error")
     elif isinstance(normalized.get("validation"), dict) and not normalized["validation"].get("accepted", True):
-        # Read did not pass read_validation (format/confidence/consensus):
+        # Read did not pass read_validation (format/confidence/value):
         # an explicit reject with its reason, never a guessed OK.
         normalized["status"] = "NOK"
         normalized.setdefault("failure_reason", normalized["validation"].get("reason") or "format_mismatch")
@@ -124,8 +115,8 @@ def _run_with_callback(fn, frame, callback, profile: bool = False) -> None:
         result = None
         exception_msg = None
         try:
-            # The worker runs the selected backend off the main thread so the
-            # caller can continue immediately while the result is prepared.
+            # The worker runs the read off the main thread so the caller
+            # can continue immediately while the result is prepared.
             result = fn(frame, profile=profile) if profile else fn(frame)
         except Exception as exc:
             exception_msg = str(exc)

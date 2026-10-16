@@ -68,7 +68,6 @@ REJECT_NO_TEXT = "no_text_detected"
 REJECT_FORMAT = "format_mismatch"
 REJECT_CONFIDENCE = "low_confidence"
 REJECT_VALUE = "invalid_value"
-REJECT_CONSENSUS = "no_consensus"
 
 
 def normalize_token(text: str) -> str:
@@ -231,45 +230,6 @@ class CodeTemplate:
                 return None
             out.append(m[0]); corr += m[1]; lit += m[2]
         return "".join(out), corr, lit
-
-    def fuse(self, reads, min_reads=2, min_share=0.7) -> dict:
-        """
-        Character-level vote over several reads of the same print.
-
-        reads: validate() results. Every read that fits the template votes
-        (accepted ones, and ones rejected only for low_confidence or
-        invalid_value - they are still correctly fielded), weighted by its
-        lowest token confidence. Per information position the weighted
-        winner is taken; the fused code is OK only if at least min_reads
-        reads voted and every position's winner holds >= min_share of the
-        weight there, and the result passes value_pattern. So a "5" in one
-        read is outvoted at that position by the "6" in others, while a
-        position the reads genuinely disagree on rejects the code.
-        """
-        voting = [r for r in reads if r.get("text") and r.get("reason") in (None, REJECT_CONFIDENCE, REJECT_VALUE)]
-        if len(voting) < max(1, int(min_reads)):
-            reason = REJECT_CONSENSUS if voting else (reads[0].get("reason") if reads else REJECT_NO_TEXT)
-            return {"accepted": False, "reason": reason or REJECT_FORMAT, "text": None, "n_reads": len(voting)}
-        weights = [max(1e-3, float(r.get("min_token_confidence") or 0.0)) for r in voting]
-        fused, shares = list(self.canonical_template), {}
-        for pos in self.info_positions:
-            tally = {}
-            for r, w in zip(voting, weights):
-                ch = r["text"][pos]
-                tally[ch] = tally.get(ch, 0.0) + w
-            best = max(tally, key=tally.get)
-            fused[pos] = best
-            shares[pos] = tally[best] / sum(tally.values())
-        # literals come from the template itself
-        text = "".join(fused)
-        lowest = min(shares.values()) if shares else 1.0
-        out = {"text": text, "n_reads": len(voting), "min_share": round(lowest, 3),
-               "position_shares": [round(shares[p], 2) for p in self.info_positions]}
-        if lowest < float(min_share):
-            return dict(out, accepted=False, reason=REJECT_CONSENSUS)
-        if self.value_pattern and not self.value_pattern.fullmatch(text):
-            return dict(out, accepted=False, reason=REJECT_VALUE)
-        return dict(out, accepted=True, reason=None)
 
     def validate(self, candidates) -> dict:
         tokens = [(normalize_token(c.get("text", "")), float(c.get("confidence", 0.0)))

@@ -28,11 +28,9 @@ _GOOD_READ = {
 
 class VisionIntegrationTests(unittest.TestCase):
     def setUp(self):
-        self._old_app_state = vision._app_state
         self._old_ocr = vision.ocr_instance
 
     def tearDown(self):
-        vision._app_state = self._old_app_state
         vision.ocr_instance = self._old_ocr
 
     def test_run_vision_accepted_read_is_ok(self):
@@ -53,6 +51,13 @@ class VisionIntegrationTests(unittest.TestCase):
 
         result = vision.run_vision(frame=object())
         self.assertEqual((result["status"], result["failure_reason"]), ("NOK", "invalid_value"))
+
+    def test_engine_error_becomes_ocr_engine_error(self):
+        normalized = vision._normalize_result(
+            {"detections": [], "text": "", "mode": "ocread", "error": "worker died"}
+        )
+        self.assertEqual(normalized["status"], "NOK")
+        self.assertEqual(normalized["failure_reason"], "ocr_engine_error")
 
     def test_run_vision_returns_nok_for_missing_frame(self):
         vision.ocr_instance = _FakeOCR(_GOOD_READ)
