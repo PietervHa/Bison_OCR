@@ -1,44 +1,29 @@
-import csv
-import io
-import json
+import os
 import secrets
-from datetime import date, datetime, timedelta
 import cv2
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from openpyxl import Workbook
 from pydantic import BaseModel
 from pathlib import Path
-from backend.core import auth, db
 from backend.core.config_loader import cfg
 import time
 
 
-# Columns that always appear first, in this order, in an export.
-_CORE_EXPORT_COLUMNS = [
-    "timestamp", "status", "mode", "confidence_threshold",
-    "processing_time_ms", "cycle_time_ms", "error",
-]
+# Seconds a wrong maintenance password is held before the reply goes out,
+# to slow down guessing.
+_WRONG_PASSWORD_DELAY_S = 1.0
 
 
-def _build_export_table(results: list) -> tuple:
-    extra_columns = set()
-    for r in results:
-        extra_columns.update(k for k in r.keys() if k not in _CORE_EXPORT_COLUMNS)
-    headers = _CORE_EXPORT_COLUMNS + sorted(extra_columns)
+def _maintenance_password() -> str:
+    """The maintenance password from MAINTENANCE_PASSWORD (.env or the
+    environment). Empty means not configured: maintenance stays locked."""
+    return os.environ.get("MAINTENANCE_PASSWORD", "")
 
-    rows = []
-    for r in results:
-        row = []
-        for col in headers:
-            value = r.get(col)
-            if isinstance(value, (list, dict)):
-                value = json.dumps(value, ensure_ascii=False)
-            row.append(value)
-        rows.append(row)
-    return headers, rows
+
+def _wrong_password_delay() -> None:
+    time.sleep(_WRONG_PASSWORD_DELAY_S)
 
 
 # --- Request bodies -------------------------------------------------------
@@ -47,14 +32,11 @@ def _build_export_table(results: list) -> tuple:
 
 class MaintenanceModeBody(BaseModel):
     maintenance_mode: bool = False
-    username: str = ""
     password: str = ""
 
 
 def create_app(camera, app_state) -> FastAPI:
     app = FastAPI()
-
-    db.init_db()
 
     # flask-cors' CORS(app) defaults to allowing all origins/methods/headers
     # without credentials; this mirrors that.
@@ -142,7 +124,6 @@ def create_app(camera, app_state) -> FastAPI:
         is_maintenance = _is_maintenance_access(request)
         return {
             "maintenance_mode": is_maintenance,
-            "username": app_state.get_maintenance_session_user() if is_maintenance else None,
             "machine_id": cfg["machine_id"],
             "version": "1.0.0",
         }
@@ -153,51 +134,22 @@ def create_app(camera, app_state) -> FastAPI:
 
     @app.post("/maintenance_mode")
     def set_maintenance_mode(body: MaintenanceModeBody, request: Request, response: Response):
-        # Entering maintenance mode always requires a valid username+password
-        # against the `users` table. Every attempt -- success or failure,
-        # including unknown usernames -- is logged to login_log. Unknown
-        # usernames are called out explicitly (rather than folded into a
-        # generic "incorrect" message) and, since there's no real account to
-        # attach a strike to, they can never trigger a lockout -- only a
-        # streak of failures against a username that actually exists can.
+        # Entering maintenance mode requires the single password from
+        # MAINTENANCE_PASSWORD. When it isn't configured, maintenance mode
+        # stays locked - it is never open by default.
         if body.maintenance_mode:
-            username = body.username.strip()
-            client_ip = request.client.host if request.client else None
-
-            user = db.get_user(username) if username else None
-            if user is None:
-                # Still run a scrypt hash against a dummy value so an unknown
-                # username takes roughly as long as a known one with a wrong
-                # password -- a minor defense-in-depth measure even though
-                # the message below already tells the caller the account
-                # doesn't exist.
-                auth.verify_password(body.password, auth.DUMMY_PASSWORD_HASH)
-                db.record_login(username or "(empty)", False, client_ip)
-                return JSONResponse(
-                    status_code=403,
-                    content={"error": "unknown_user", "message": "No account exists for that username."},
-                )
-
-            recent_failures = db.get_recent_failures_since_last_success(username, limit=auth.MAX_FAILED_ATTEMPTS)
-            unlock_at = auth.lockout_until(recent_failures)
-            if unlock_at is not None:
-                # Locked: don't even check the password, and log this attempt
-                # as a failure too, so continuing to hammer a locked account
-                # extends the lock rather than doing nothing.
-                db.record_login(username, False, client_ip)
+            expected = _maintenance_password()
+            if not expected:
                 return JSONResponse(
                     status_code=403,
                     content={
-                        "error": "locked_out",
-                        "message": f"Account locked after repeated failed attempts. Try again after {unlock_at.strftime('%H:%M:%S')}.",
-                        "locked_until": unlock_at.isoformat(),
+                        "error": "not_configured",
+                        "message": "Maintenance mode is locked: MAINTENANCE_PASSWORD is not set.",
                     },
                 )
 
-            password_ok = auth.verify_password(body.password, user["password_hash"])
-            db.record_login(username, password_ok, client_ip)
-
-            if not password_ok:
+            if not secrets.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8")):
+                _wrong_password_delay()
                 return JSONResponse(
                     status_code=403,
                     content={"error": "invalid_password", "message": "Incorrect password."},
@@ -206,7 +158,6 @@ def create_app(camera, app_state) -> FastAPI:
             session_token = secrets.token_urlsafe(24)
             app_state.set_maintenance_mode(True)
             app_state.set_maintenance_session_token(session_token)
-            app_state.set_maintenance_session_user(username)
             response.set_cookie(
                 "maintenance_session",
                 session_token,
@@ -215,26 +166,12 @@ def create_app(camera, app_state) -> FastAPI:
                 max_age=60 * 30,
                 path="/",
             )
-            return {"maintenance_mode": True, "username": username}
+            return {"maintenance_mode": True}
 
         app_state.set_maintenance_mode(False)
         app_state.set_maintenance_session_token("")
-        app_state.set_maintenance_session_user("")
         response.delete_cookie("maintenance_session", path="/")
         return {"maintenance_mode": False}
-
-    @app.delete("/login_log")
-    def clear_login_log(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
-        deleted = db.clear_login_log()
-        return {"cleared": deleted}
-
-    @app.get("/login_log")
-    def login_log(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
-        return {"logins": db.get_recent_logins(limit=20)}
 
     @app.post("/camera_rotation")
     def rotate_camera(request: Request):
@@ -263,150 +200,5 @@ def create_app(camera, app_state) -> FastAPI:
             return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
         app_state.reset_counters()
         return {"status": "counters reset"}
-
-    @app.get("/analytics")
-    def analytics():
-        template_path = Path(__file__).resolve().parent / "templates" / "analytics.html"
-        return FileResponse(template_path)
-
-    @app.get("/analytics/data")
-    def analytics_data(date_param: str = Query(default="", alias="date")):
-        try:
-            # Parse requested date, default to today, clamp to 7-day window
-            today = date.today()
-            min_date = today - timedelta(days=6)  # 7 days including today
-
-            raw_date = date_param
-            try:
-                requested_date = date.fromisoformat(raw_date) if raw_date else today
-            except ValueError:
-                requested_date = today
-
-            # Clamp: never go beyond today or before 7 days ago
-            if requested_date > today:
-                requested_date = today
-            if requested_date < min_date:
-                requested_date = min_date
-
-            results = db.query_summary(requested_date, requested_date)
-
-            total = len(results)
-            ok_count = sum(1 for r in results if r.get("status") == "OK")
-            nok_count = total - ok_count
-
-            processing_times = [
-                r["processing_time_ms"] for r in results
-                if isinstance(r.get("processing_time_ms"), (int, float))
-            ]
-            avg_processing_ms = round(
-                sum(processing_times) / len(processing_times), 2
-            ) if processing_times else 0.0
-
-            # Build timeline: group results by hour (0-23), count OK and NOK per hour
-            timeline = {str(h): {"ok": 0, "nok": 0} for h in range(24)}
-            for r in results:
-                ts = r.get("timestamp")
-                if not isinstance(ts, datetime):
-                    continue
-                hour = str(ts.hour)
-                if r.get("status") == "OK":
-                    timeline[hour]["ok"] += 1
-                else:
-                    timeline[hour]["nok"] += 1
-
-            # Builds speed timeline in 15-minute buckets
-            # Key format: "HH:MM" for each 15-min slot (00:00, 00:15, 00:30, 00:45, 01:00 ...)
-            speed_buckets = {}
-            for r in results:
-                ts = r.get("timestamp")
-                pt = r.get("processing_time_ms")
-                if not isinstance(pt, (int, float)) or not isinstance(ts, datetime):
-                    continue
-                minute_slot = (ts.minute // 15) * 15
-                key = f"{ts.hour:02d}:{minute_slot:02d}"
-                speed_buckets.setdefault(key, []).append(float(pt))
-
-            speed_timeline = {}
-            for key, times in speed_buckets.items():
-                speed_timeline[key] = {
-                    "avg": round(sum(times) / len(times), 2),
-                    "min": round(min(times), 2),
-                    "max": round(max(times), 2),
-                }
-
-            return {
-                "date": requested_date.isoformat(),
-                "is_today": requested_date == today,
-                "is_min_date": requested_date <= min_date,
-                "total": total,
-                "ok_count": ok_count,
-                "nok_count": nok_count,
-                "ok_rate": round(ok_count / total * 100, 1) if total > 0 else 0.0,
-                "avg_processing_ms": avg_processing_ms,
-                "timeline": timeline,
-                "speed_timeline": speed_timeline,
-            }
-
-        except Exception as exc:
-            return JSONResponse(status_code=500, content={"error": str(exc)})
-
-    @app.get("/analytics/export")
-    def analytics_export(
-        start: str = Query(default=""),
-        end: str = Query(default=""),
-        export_format: str = Query(default="csv", alias="format"),
-    ):
-        try:
-            try:
-                start_date = date.fromisoformat(start)
-                end_date = date.fromisoformat(end)
-            except ValueError:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "start and end must be dates in YYYY-MM-DD format"},
-                )
-
-            if start_date > end_date:
-                start_date, end_date = end_date, start_date
-
-            if export_format not in ("csv", "xlsx"):
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "format must be 'csv' or 'xlsx'"},
-                )
-
-            results = db.query_full(start_date, end_date)
-            headers, rows = _build_export_table(results)
-            filename_base = f"inspections_{start_date.isoformat()}_to_{end_date.isoformat()}"
-
-            if export_format == "csv":
-                buffer = io.StringIO()
-                writer = csv.writer(buffer)
-                writer.writerow(headers)
-                writer.writerows(rows)
-                # utf-8-sig so Excel recognizes the encoding instead of mangling accented characters
-                csv_bytes = buffer.getvalue().encode("utf-8-sig")
-                return Response(
-                    content=csv_bytes,
-                    media_type="text/csv",
-                    headers={"Content-Disposition": f'attachment; filename="{filename_base}.csv"'},
-                )
-
-            workbook = Workbook()
-            sheet = workbook.active
-            sheet.title = "Inspections"
-            sheet.append(headers)
-            for row in rows:
-                sheet.append(row)
-            xlsx_buffer = io.BytesIO()
-            workbook.save(xlsx_buffer)
-            return Response(
-                content=xlsx_buffer.getvalue(),
-                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={"Content-Disposition": f'attachment; filename="{filename_base}.xlsx"'},
-            )
-
-        except Exception as exc:
-            return JSONResponse(status_code=500, content={"error": str(exc)})
 
     return app

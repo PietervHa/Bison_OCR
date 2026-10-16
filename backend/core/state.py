@@ -27,7 +27,6 @@ class AppState:
         }
         self.maintenance_mode = False
         self.maintenance_session_token = ""
-        self.maintenance_session_user = ""
         self.camera_rotation = 0  # steps: 0, 1, 2, 3 (each = 90° clockwise)
 
     def update_result(self, result: dict):
@@ -97,20 +96,6 @@ class AppState:
         """
         with self.lock:
             self.maintenance_session_token = str(value or "")
-
-    def get_maintenance_session_user(self) -> str:
-        """
-        Gets the username of whoever is currently authenticated for maintenance mode.
-        """
-        with self.lock:
-            return self.maintenance_session_user
-
-    def set_maintenance_session_user(self, value: str):
-        """
-        Stores or clears the username tied to the current maintenance session.
-        """
-        with self.lock:
-            self.maintenance_session_user = str(value or "")
 
     def get_camera_rotation(self) -> int:
         """

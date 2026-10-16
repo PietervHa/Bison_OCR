@@ -1,5 +1,4 @@
 let CURRENT_MODE = "production";
-let CURRENT_USER = null;
 let LAST_APPLIED_MODE = null;
 
 /* =========================
@@ -74,7 +73,6 @@ async function loadStatus() {
     const res = await fetch("/status", { credentials: "same-origin", cache: "no-store" });
     const data = await res.json();
     CURRENT_MODE = data.maintenance_mode ? "maintenance" : "production";
-    CURRENT_USER = data.maintenance_mode ? (data.username || null) : null;
 
     const machineIdLabel = document.getElementById("machineIdLabel");
     if (machineIdLabel && data.machine_id) {
@@ -153,84 +151,6 @@ function startCameraStatusPolling() {
 
 
 /* =========================
-   LOGIN LOG (maintenance mode only)
-========================= */
-/* escapeHtml() is defined in dialogs.js, loaded before this file */
-
-function formatLoginTimestamp(ts) {
-    if (!ts) return "-";
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return String(ts);
-    return d.toLocaleString();
-}
-
-function renderLoginLogRow(entry) {
-    const success = !!entry.success;
-    const cls = success ? "success" : "fail";
-    const statusText = success ? "OK" : "FAILED";
-    const user = escapeHtml(entry.username || "unknown");
-    const time = escapeHtml(formatLoginTimestamp(entry.timestamp));
-    return `<div class="login-log-row ${cls}">` +
-        `<span class="login-log-user">${user}</span>` +
-        `<span class="login-log-status">${statusText}</span>` +
-        `<span class="login-log-time">${time}</span>` +
-        `</div>`;
-}
-
-async function refreshLoginLog() {
-    const listEl = document.getElementById("loginLogList");
-    if (!listEl) return;
-    try {
-        const res = await fetch("/login_log", { credentials: "same-origin", cache: "no-store" });
-        if (!res.ok) {
-            listEl.textContent = "Unable to load login history.";
-            return;
-        }
-        const data = await res.json();
-        const entries = Array.isArray(data.logins) ? data.logins : [];
-        listEl.innerHTML = entries.length
-            ? entries.map(renderLoginLogRow).join("")
-            : "No login attempts recorded.";
-    } catch (e) {
-        console.error("Failed to load login log:", e);
-        listEl.textContent = "Unable to load login history.";
-    }
-}
-
-document.getElementById("refreshLoginLogBtn")?.addEventListener("click", () => {
-    if (CURRENT_MODE !== "maintenance") return;
-    refreshLoginLog();
-});
-
-document.getElementById("clearLoginLogBtn")?.addEventListener("click", async () => {
-    if (CURRENT_MODE !== "maintenance") return;
-    const confirmed = await showConfirmDialog({
-        title: "Clear Login History",
-        message: "This also lifts any account lockout currently in effect. This cannot be undone.",
-        confirmLabel: "Clear",
-        destructive: true
-    });
-    if (!confirmed) return;
-
-    try {
-        const res = await fetch("/login_log", {
-            method: "DELETE",
-            credentials: "same-origin"
-        });
-        if (!res.ok) {
-            showToast("Could not clear login history.", { type: "error" });
-            return;
-        }
-    } catch (e) {
-        console.error("Failed to clear login log:", e);
-        showToast("Could not reach the server. Please try again.", { type: "error" });
-        return;
-    }
-
-    refreshLoginLog();
-});
-
-/* =========================
    MODE HANDLING
 ========================= */
 function applyMode() {
@@ -246,10 +166,8 @@ function applyMode() {
         rotateBtn.style.display = CURRENT_MODE === "maintenance" ? "inline-block" : "none";
     }
 
-    const loginLogBox = document.getElementById("loginLogBox");
-
     if (CURRENT_MODE === "maintenance") {
-        banner.textContent = CURRENT_USER ? `MAINTENANCE MODE — ${CURRENT_USER}` : "MAINTENANCE MODE";
+        banner.textContent = "MAINTENANCE MODE";
         banner.className = "mode-overlay maintenance";
 
         if (resetBtn) resetBtn.disabled = false;
@@ -263,11 +181,6 @@ function applyMode() {
 
         if (cycleTimeSection) {
             cycleTimeSection.style.display = "block";
-        }
-
-        if (loginLogBox) {
-            loginLogBox.style.display = "block";
-            refreshLoginLog();
         }
     }
 
@@ -286,10 +199,6 @@ function applyMode() {
 
         if (cycleTimeSection) {
             cycleTimeSection.style.display = "none";
-        }
-
-        if (loginLogBox) {
-            loginLogBox.style.display = "none";
         }
     }
 
@@ -322,7 +231,6 @@ document.getElementById("startProductionBtn").addEventListener("click", async ()
         }
 
         CURRENT_MODE = "production";
-        CURRENT_USER = null;
         applyMode();
     } catch (e) {
         console.error("Failed to switch to production mode:", e);
@@ -331,17 +239,17 @@ document.getElementById("startProductionBtn").addEventListener("click", async ()
 });
 
 document.getElementById("startMaintenanceBtn").addEventListener("click", async () => {
-    const loggedIn = await showLoginDialog(async (username, password) => {
+    const loggedIn = await showLoginDialog(async (password) => {
         try {
             const res = await fetch("/maintenance_mode", {
                 method: "POST",
                 credentials: "same-origin",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ maintenance_mode: true, username, password })
+                body: JSON.stringify({ maintenance_mode: true, password })
             });
 
             if (!res.ok) {
-                let message = "Incorrect username or password. Access denied.";
+                let message = "Incorrect password. Access denied.";
                 try {
                     const errBody = await res.json();
                     if (errBody && errBody.message) message = errBody.message;
@@ -351,8 +259,6 @@ document.getElementById("startMaintenanceBtn").addEventListener("click", async (
                 return { ok: false, message };
             }
 
-            const data = await res.json();
-            CURRENT_USER = data.username || username;
             return { ok: true };
         } catch (e) {
             console.error("Failed to enter maintenance mode:", e);

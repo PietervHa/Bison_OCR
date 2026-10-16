@@ -503,12 +503,6 @@ web:
 output:
   result_dir: "data/results"
 
-# Database settings — SQLite for now. Once MDE's MSSQL server can be
-# reached, switch the url below and nothing else needs to change:
-#   url: "mssql+pyodbc://user:password@server/db?driver=ODBC+Driver+17+for+SQL+Server"
-database:
-  url: "sqlite:///data/results.db"
-
 # Trigger settings
 # Automated long-running Q trigger for vision testing
 # Disabled by default so normal application startup is unchanged.
@@ -536,7 +530,3 @@ trigger:
   # read from the product is sent back instead (newline-terminated), and the
   # PLC is responsible for comparing it against the expected value.
 
-# Security settings
-# Maintenance-mode login is per-user now (see the `users` table / QC_tools/manage_users.py),
-# not a single shared password, so there's nothing to configure here.
-security: {}
