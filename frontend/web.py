@@ -17,30 +17,6 @@ from backend.utils.roi import draw_roi
 import time
 
 
-def _resolve_repo_path(path: str) -> Path:
-    resolved = Path(path)
-    if not resolved.is_absolute():
-        resolved = Path(__file__).resolve().parents[1] / resolved
-    return resolved.resolve()
-
-
-# Only paths under this directory may be loaded as a classifier, even by a
-# maintenance-authenticated request. Prevents /load_classifier from being
-# pointed at an arbitrary location on disk.
-_MODELS_ROOT = (Path(__file__).resolve().parents[1] / "models").resolve()
-
-
-def _is_within_models_dir(resolved_path: Path) -> bool:
-    try:
-        return resolved_path.is_relative_to(_MODELS_ROOT)
-    except AttributeError:  # pragma: no cover - Python < 3.9 fallback
-        try:
-            resolved_path.relative_to(_MODELS_ROOT)
-            return True
-        except ValueError:
-            return False
-
-
 # Columns that always appear first, in this order, in an export.
 _CORE_EXPORT_COLUMNS = [
     "timestamp", "status", "mode", "confidence_threshold",
@@ -86,10 +62,6 @@ class VisionModeBody(BaseModel):
 
 class OcrKeywordBody(BaseModel):
     ocr_keyword: str = ""
-
-
-class LoadClassifierBody(BaseModel):
-    model_path: str = ""
 
 
 def create_app(camera, app_state) -> FastAPI:
@@ -327,30 +299,6 @@ def create_app(camera, app_state) -> FastAPI:
             return JSONResponse(status_code=400, content={"error": "ocr_keyword cannot be empty"})
         app_state.set_ocr_keyword(new_keyword)
         return {"ocr_keyword": app_state.get_ocr_keyword()}
-
-    @app.post("/load_classifier")
-    def load_classifier(body: LoadClassifierBody, request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
-        model_path = body.model_path.strip()
-        resolved_path = _resolve_repo_path(model_path)
-        if not model_path or not resolved_path.exists():
-            return JSONResponse(status_code=400, content={"error": "model_path does not exist"})
-        if not _is_within_models_dir(resolved_path):
-            return JSONResponse(
-                status_code=400,
-                content={"error": f"model_path must be inside {_MODELS_ROOT.name}/"},
-            )
-        classifier_loaded = bool(app_state.load_classifier(str(resolved_path)))
-        return {"classifier_loaded": classifier_loaded, "model_path": str(resolved_path)}
-
-    @app.get("/classifier_status")
-    def get_classifier_status():
-        status = app_state.get_classifier_status()
-        return {
-            "classifier_loaded": bool(status.get("loaded", False)),
-            "model_path": status.get("model_path") or None,
-        }
 
     @app.get("/video_feed")
     def video_feed():

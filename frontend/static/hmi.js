@@ -7,7 +7,6 @@ let LAST_APPLIED_MODE = null;
 function updateVisionModeButtons() {
     const ocrBtn = document.getElementById("modeOcrBtn");
     const ocreadBtn = document.getElementById("modeOcreadBtn");
-    const objBtn = document.getElementById("modeObjBtn");
 
     if (ocrBtn) {
         ocrBtn.classList.toggle("active", VISION_MODE === "ocr");
@@ -15,10 +14,6 @@ function updateVisionModeButtons() {
 
     if (ocreadBtn) {
         ocreadBtn.classList.toggle("active", VISION_MODE === "ocread");
-    }
-
-    if (objBtn) {
-        objBtn.classList.toggle("active", VISION_MODE === "object_detection");
     }
 }
 
@@ -518,11 +513,6 @@ document.getElementById("modeOcrBtn").addEventListener("click", () => {
 document.getElementById("modeOcreadBtn").addEventListener("click", () => {
     if (CURRENT_MODE !== "maintenance") return;
     applyVisionMode("ocread");
-});
-
-document.getElementById("modeObjBtn").addEventListener("click", () => {
-    if (CURRENT_MODE !== "maintenance") return;
-    applyVisionMode("object_detection");
 });
 
 document.getElementById("rotateCameraBtn").addEventListener("click", async () => {

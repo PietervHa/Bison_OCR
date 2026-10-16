@@ -33,8 +33,6 @@ class AppState:
         self.camera_rotation = 0  # steps: 0, 1, 2, 3 (each = 90° clockwise)
         self.vision_mode = cfg["vision_mode"]
         self.ocr_keyword = cfg["ocr"]["keywords"][0] if cfg["ocr"]["keywords"] else ""
-        self.classifier_model_path = ""
-        self.classifier_loaded = False
         self.set_threshold(float(cfg["confidence_threshold"]))
 
     def update_result(self, result: dict):
@@ -151,7 +149,7 @@ class AppState:
 
     def get_vision_mode(self) -> str:
         """
-        Gets the current vision mode (e.g., 'ocr', 'object_detection', 'ocread').
+        Gets the current vision mode ('ocr' or 'ocread').
         """
         with self.lock:
             return self.vision_mode
@@ -161,7 +159,7 @@ class AppState:
         Sets the vision mode.
         """
         with self.lock:
-            if value in ("ocr", "object_detection", "ocread"):
+            if value in ("ocr", "ocread"):
                 self.vision_mode = value
 
     def get_ocr_keyword(self) -> str:
@@ -177,45 +175,3 @@ class AppState:
         """
         with self.lock:
             self.ocr_keyword = value.strip().lower()
-
-    def get_classifier_status(self) -> dict:
-        """
-        Gets the loading status and path of the image classifier.
-        """
-        with self.lock:
-            return {
-                "loaded": self.classifier_loaded,
-                "model_path": self.classifier_model_path,
-            }
-
-    def set_classifier_loaded(self, path: str):
-        """
-        Updates the internal state to reflect whether a classifier is loaded.
-        """
-        with self.lock:
-            self.classifier_loaded = bool(path)
-            self.classifier_model_path = path if path else ""
-
-    def load_classifier(self, model_path: str) -> bool:
-        """
-        Triggers the vision module to load a classifier model and updates state.
-        """
-        model_path = (model_path or "").strip()
-        if not model_path:
-            self.set_classifier_loaded("")
-            return False
-
-        loaded = False
-        try:
-            # Keep state as orchestrator metadata; the actual model load happens
-            # inside the vision module so the state object stays lightweight.
-            from backend.core import vision
-
-            loader = getattr(vision, "load_classifier", None)
-            if callable(loader):
-                loaded = bool(loader(model_path))
-        except Exception:
-            loaded = False
-
-        self.set_classifier_loaded(model_path if loaded else "")
-        return loaded

@@ -10,72 +10,58 @@ from backend.output import result_writer
 
 
 class _FakeAppState:
-    def __init__(self, mode="object_detection", threshold=0.8):
-        self._mode = mode
-        self._threshold = threshold
-        self.classifier_updates = []
-
     def get_vision_mode(self):
-        return self._mode
-
-    def get_threshold(self):
-        return self._threshold
-
-    def set_classifier_loaded(self, value):
-        self.classifier_updates.append(value)
+        return "ocread"
 
 
-class _FakeEngine:
+class _FakeOCR:
     def __init__(self, response):
         self._response = response
 
-    def evaluate(self, _frame):
+    def read(self, _frame, profile=False):
         return dict(self._response)
+
+
+_GOOD_READ = {
+    "detections": [{"text": "4113 08:26", "confidence": 0.97}, {"text": "BB 05/26", "confidence": 0.97}],
+    "text": "4113 08:26 BB 05/26",
+    "processing_time_ms": 2.1,
+    "mode": "ocread",
+    "validation": {"accepted": True, "reason": None, "reads": [], "fusion": None},
+}
 
 
 class VisionIntegrationTests(unittest.TestCase):
     def setUp(self):
         self._old_app_state = vision._app_state
-        self._old_engine = vision._inspection_engine
-        self._old_cached_mode = vision._cached_vision_mode
+        self._old_ocr = vision.ocr_instance
+        vision._app_state = _FakeAppState()
 
     def tearDown(self):
         vision._app_state = self._old_app_state
-        vision._inspection_engine = self._old_engine
-        vision._cached_vision_mode = self._old_cached_mode
+        vision.ocr_instance = self._old_ocr
 
-    def test_run_vision_object_detection_applies_threshold_normalization(self):
-        vision._app_state = _FakeAppState(mode="object_detection", threshold=0.8)
-        vision._inspection_engine = _FakeEngine(
-            {
-                "status": "OK",
-                "detections": [{"label": "cap", "confidence": 0.92}],
-                "processing_time_ms": 2.1,
-            }
-        )
+    def test_run_vision_accepted_read_is_ok(self):
+        vision.ocr_instance = _FakeOCR(_GOOD_READ)
 
         result = vision.run_vision(frame=object())
 
         self.assertEqual(result["status"], "OK")
-        self.assertEqual(result["mode"], "object_detection")
-        self.assertAlmostEqual(result["confidence"], 0.92)
+        self.assertEqual(result["mode"], "ocread")
+        self.assertEqual(result["text"], "4113 08:26 BB 05/26")
+        self.assertAlmostEqual(result["confidence"], 0.97)
 
-    def test_run_vision_forces_nok_when_confidence_below_threshold(self):
-        vision._app_state = _FakeAppState(mode="object_detection", threshold=0.8)
-        vision._inspection_engine = _FakeEngine(
-            {
-                "status": "OK",
-                "detections": [{"label": "cap", "confidence": 0.2}],
-                "processing_time_ms": 1.0,
-            }
-        )
+    def test_run_vision_rejected_read_is_nok_with_reason(self):
+        vision.ocr_instance = _FakeOCR({
+            "detections": [], "text": "", "processing_time_ms": 1.0, "mode": "ocread",
+            "validation": {"accepted": False, "reason": "invalid_value", "reads": [], "fusion": None},
+        })
 
         result = vision.run_vision(frame=object())
-        self.assertEqual(result["status"], "NOK")
+        self.assertEqual((result["status"], result["failure_reason"]), ("NOK", "invalid_value"))
 
     def test_run_vision_returns_nok_for_missing_frame(self):
-        vision._app_state = _FakeAppState(mode="object_detection", threshold=0.8)
-        vision._inspection_engine = _FakeEngine({"status": "OK"})
+        vision.ocr_instance = _FakeOCR(_GOOD_READ)
 
         result = vision.run_vision(frame=None)
 
@@ -84,14 +70,7 @@ class VisionIntegrationTests(unittest.TestCase):
         self.assertEqual(result["detections"], [])
 
     def test_run_vision_callback_path_returns_normalized_payload(self):
-        vision._app_state = _FakeAppState(mode="object_detection", threshold=0.1)
-        vision._inspection_engine = _FakeEngine(
-            {
-                "label": "non-defective",
-                "confidence": 0.9,
-                "processing_time_ms": 1.0,
-            }
-        )
+        vision.ocr_instance = _FakeOCR(_GOOD_READ)
 
         event = threading.Event()
         captured = {}
@@ -104,13 +83,29 @@ class VisionIntegrationTests(unittest.TestCase):
         self.assertTrue(event.wait(2.0), "vision callback did not complete in time")
 
         self.assertEqual(captured["status"], "OK")
-        self.assertEqual(captured["mode"], "object_detection")
-        self.assertEqual(len(captured["detections"]), 1)
-        self.assertEqual(captured["detections"][0]["label"], "non-defective")
+        self.assertEqual(captured["mode"], "ocread")
+        self.assertEqual(len(captured["detections"]), 2)
+        self.assertEqual(captured["text"], "4113 08:26 BB 05/26")
+
+    def test_run_vision_callback_path_reports_engine_exception(self):
+        class _Broken:
+            def read(self, _frame, profile=False):
+                raise RuntimeError("boom")
+
+        vision.ocr_instance = _Broken()
+        event = threading.Event()
+        captured = {}
+
+        def callback(result):
+            captured.update(result)
+            event.set()
+
+        vision.run_vision(frame=object(), callback=callback)
+        self.assertTrue(event.wait(2.0), "vision callback did not complete in time")
+        self.assertEqual((captured["status"], captured["failure_reason"]), ("NOK", "ocr_engine_error"))
 
     def test_run_vision_callback_path_returns_nok_for_missing_frame(self):
-        vision._app_state = _FakeAppState(mode="object_detection", threshold=0.1)
-        vision._inspection_engine = _FakeEngine({"status": "OK"})
+        vision.ocr_instance = _FakeOCR(_GOOD_READ)
 
         event = threading.Event()
         captured = {}

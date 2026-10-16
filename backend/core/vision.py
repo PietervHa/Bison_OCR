@@ -1,24 +1,17 @@
 """
 Vision Orchestration Module
 
-This module serves as the primary entry point for vision tasks, coordinating between
-different detection engines (OCR, Object Detection/Classification) and managing
-the communication with the application state.
+This module serves as the primary entry point for vision tasks, running the OCR
+engine on a frame and managing the communication with the application state.
 """
 
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any, Optional
 from backend.core.config_loader import cfg
-from backend.core.inspection_engine import InspectionEngine
-from backend.detection.objectdetection import run_object_detection
 from backend.detection.ocr import OCR
 from backend.utils.logger import get_logger
 import time
-import os
-import torch
-torch.set_num_threads(max(1, (os.cpu_count() or 4) // 2))
 
 logger = get_logger(__name__)
 
@@ -27,80 +20,26 @@ VISION_MODE = cfg["vision_mode"]
 
 # Global instances managed by this module
 ocr_instance = None
-_inspection_engine: Optional[InspectionEngine] = None
 _app_state: Optional[Any] = None
-_cached_vision_mode: str = cfg.get("vision_mode", "object_detection")
+_cached_vision_mode: str = cfg.get("vision_mode", "ocread")
 
 # A single-threaded pool to process vision tasks sequentially without blocking the main loop
 _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision_worker")
 
 
-def _resolve_model_path(model_path: str) -> Path:
-    """
-    Resolves a model path, handling both absolute and relative paths relative to the project root.
-    """
-    resolved = Path(model_path)
-    if not resolved.is_absolute():
-        # Resolve relative to the project root (assumed 2 levels up from backend/core)
-        resolved = Path(__file__).resolve().parents[2] / resolved
-    return resolved.resolve()
-
-
-def _sync_classifier_state(model_path: str, loaded: bool) -> None:
-    """
-    Updates the shared application state with the current classifier loading status.
-    """
-    app_state = _app_state
-    if app_state is None or not hasattr(app_state, "set_classifier_loaded"):
-        return
-    app_state.set_classifier_loaded(model_path if loaded else "")
-
-
 def bind_app_state(app_state) -> None:
     """
-    Connects the vision module to the application state and initializes detection engines.
+    Connects the vision module to the application state and initializes the OCR engine.
     """
-    global ocr_instance, _inspection_engine, _app_state, _cached_vision_mode
+    global ocr_instance, _app_state, _cached_vision_mode
     _app_state = app_state
-    _cached_vision_mode = cfg.get("vision_mode", "object_detection")
+    _cached_vision_mode = cfg.get("vision_mode", "ocread")
     ocr_instance = OCR(app_state=app_state)
     if hasattr(ocr_instance, "warmup"):
         ocr_instance.warmup()
-    _inspection_engine = InspectionEngine(app_state)
-
-    od_cfg = cfg.get("object_detection", {})
-    backend = str(od_cfg.get("backend", "classifier")).strip().lower()
-
-    # Best effort: auto-load classifier model only in classifier backend mode.
-    if backend != "classifier":
-        _sync_classifier_state("", False)
-        return
-
-    classifier_cfg = od_cfg.get("classifier", {}) if isinstance(od_cfg.get("classifier"), dict) else {}
-    model_path = str(classifier_cfg.get("model_path", "")).strip()
-    if model_path:
-        resolved = _resolve_model_path(model_path)
-        if resolved.exists() and _inspection_engine is not None:
-            loaded = _inspection_engine.load_classifier(str(resolved))
-            _sync_classifier_state(str(resolved), loaded)
-        else:
-            _sync_classifier_state("", False)
 
 
-def load_classifier(model_path: str) -> bool:
-    """
-    Programmatically loads a classifier model into the inspection engine.
-    """
-    engine = _inspection_engine
-    if engine is None:
-        return False
-    resolved = _resolve_model_path(model_path)
-    loaded = bool(engine.load_classifier(str(resolved)))
-    _sync_classifier_state(str(resolved), loaded)
-    return loaded
-
-
-def _normalize_detections(result: dict, mode: str) -> list:
+def _normalize_detections(result: dict) -> list:
     """
     Ensures that detection results have a consistent format across different backends.
     """
@@ -111,15 +50,6 @@ def _normalize_detections(result: dict, mode: str) -> list:
         normalized = [d for d in detections if isinstance(d, dict)]
     else:
         normalized = []
-
-    if not normalized and mode == "object_detection" and result.get("label"):
-        normalized = [
-            {
-                "label": result.get("label"),
-                "text": result.get("label"),
-                "confidence": result.get("confidence", 0.0),
-            }
-        ]
 
     return normalized
 
@@ -167,7 +97,7 @@ def _normalize_result(result: dict, mode: str) -> dict:
     """
     normalized = dict(result or {})
     normalized.setdefault("mode", mode)
-    normalized["detections"] = _normalize_detections(normalized, mode)
+    normalized["detections"] = _normalize_detections(normalized)
     normalized["confidence"] = _extract_confidence(normalized)
 
     has_error = bool(normalized.get("error"))
@@ -215,20 +145,6 @@ def _normalize_result(result: dict, mode: str) -> dict:
         normalized["status"] = "OK" if normalized["detections"] else "NOK"
 
     return normalized
-
-
-def _run_object_detection(frame):
-    """
-    Internal wrapper to run object detection or classification via the InspectionEngine.
-    """
-    engine = _inspection_engine
-    if engine is None:
-        # Fallback to legacy output if engine is unavailable, but always return status.
-        legacy = run_object_detection(frame)
-        legacy["status"] = "OK" if legacy.get("detections") else "NOK"
-        legacy.setdefault("error", "no_model")
-        return legacy
-    return engine.evaluate(frame)
 
 
 def _run_with_callback(fn, frame, callback, mode: str, profile: bool = False) -> None:
@@ -298,11 +214,5 @@ def run_vision(frame, callback=None, profile: bool = False):
             _run_with_callback(ocr_instance.read, frame, callback, mode="ocread", profile=profile)
             return None
         return _normalize_result(ocr_instance.read(frame, profile=profile), mode="ocread")
-
-    if mode == "object_detection":
-        if callback:
-            _run_with_callback(_run_object_detection, frame, callback, mode="object_detection")
-            return None
-        return _normalize_result(_run_object_detection(frame), mode="object_detection")
 
     raise ValueError(f"Unknown VISION_MODE: {mode}")

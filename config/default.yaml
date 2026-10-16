@@ -2,7 +2,7 @@
 # Default configuration for the machine vision application
 
 # Top-level settings
-vision_mode: "ocread"  # valid values: "ocr" (default, backward compatible), "object_detection", "ocread"
+vision_mode: "ocread"  # valid values: "ocr", "ocread"
 machine_id: "default"
 confidence_threshold: 0.8
 
@@ -502,46 +502,6 @@ camera:
     # Usually best left untouched - adjust exposure first.
     brightness: null
     contrast: null
-
-# Object detection settings
-object_detection:
-  # Active backend: "classifier" (local HF classifier), "roboflow" (remote API), "yolo" (local YOLO model_path), template (local template matching)
-  # Switch this to select which detection pipeline is used at runtime.
-  backend: "classifier"
-
-  # Local YOLO weights path (used when backend is set to "yolo").
-  model_path: "models/yolov8n.pt"
-  inference_size: 640
-
-  # Classifier backend settings (used when backend is "classifier").
-  classifier:
-    model_path: "./models/classifier/final"
-
-  # Template matching backend settings.
-  template:
-    # One or more reference images used for matching.
-    references:
-      - "data/templates/template_1777366974416.jpg"
-      - "data/templates/template_1777366974416_scale0_85.jpg"
-      - "data/templates/template_1777366974416_scale1_15.jpg"
-      - "data/templates/template_1777371544433.jpg"
-      - "data/templates/template_1777371544433_scale0_85.jpg"
-      - "data/templates/template_1777371544433_scale1_15.jpg"
-    match_threshold: 0.6
-    display_label: "Stiftdop"
-    # Resize incoming ROI to reference dimensions before comparison.
-    resize_to_reference: true
-
-  # Roboflow backend settings (used when backend is "roboflow").
-  roboflow:
-    # Select which Roboflow profile to use from roboflow.models.
-    model: "cola_detectie"
-    models:
-      cola_detectie:
-        api_key: "SET_VIA_ENV"
-        workspace: "pieters-workspace-kugm8"
-        workflow: "detect-count-and-visualize"
-        api_url: "https://serverless.roboflow.com"
 
 # HMI settings
 hmi:
