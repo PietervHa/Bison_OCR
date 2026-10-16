@@ -74,11 +74,6 @@ VisionSoftwareMDE/
 │   ├── paddleocr_test.py
 │   ├── test_inspection_pipeline.py
 │   └── images/                # Test fixtures
-├── tools/
-│   ├── capture_dataset.py     # Dataset capture tool
-│   ├── split_dataset.py       # Dataset splitting
-│   ├── train_classifier.py    # Classifier training
-│   └── capture_template.py    # Template capture
 └── docs/
     └── *.md                   # Documentation
 ```
@@ -635,4 +630,3 @@ General workflow:
 5. Create pull request with description
 6. Address review feedback
 7. Merge when approved
-

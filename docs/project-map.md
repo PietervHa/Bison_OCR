@@ -66,11 +66,6 @@ VisionSoftwareMDE/
 │   ├── images/
 │   ├── models/
 │   └── results/
-└── tools/
-    ├── capture_dataset.py
-    ├── capture_template.py
-    ├── split_dataset.py
-    └── train_classifier.py
 ```
 
 ## What each folder does
@@ -142,12 +137,8 @@ Automated tests and test helpers for camera, OCR, and inspection pipeline behavi
 - `models/` — test model files.
 - `results/` — test output and results.
 
-### `tools/`
-Utility scripts for dataset capture, dataset splitting, template capture, and classifier training.
-
 ## Notes
 
 - Some folders may contain generated or environment-specific files that are intentionally omitted from the tree above.
 - Large dataset folders may have additional nested files not listed here.
-- The structure is organized around three main concerns: vision runtime, model training/evaluation, and supporting tools/documentation.
-
+- The structure is organized around two main concerns: vision runtime and model evaluation/documentation.

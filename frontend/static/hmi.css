@@ -271,18 +271,6 @@ body {
 
 .ocr-keyword-row button:hover { border-color: var(--steel); }
 
-.dataset-capture-counter {
-    font-family: var(--font-data);
-    font-size: 13px;
-    color: var(--white);
-    margin-top: 4px;
-    padding: 6px 10px;
-    background: rgba(238, 28, 37, 0.12);
-    border: 1px solid var(--red-dim);
-    border-radius: 3px;
-    letter-spacing: 0.3px;
-}
-
 /* Camera disconnected overlay */
 .camera-disconnected-overlay {
     display: flex;
@@ -449,50 +437,6 @@ body {
     color: var(--steel-dim);
     text-align: center;
     letter-spacing: 0.5px;
-}
-
-/* Dataset capture */
-.dataset-capture-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 10px;
-}
-
-.dataset-capture-header h2 { margin: 0; }
-
-.dataset-capture-header .btn {
-    padding: 8px 16px;
-    font-size: 12px;
-}
-
-.dataset-capture-instructions {
-    margin-top: 8px;
-    padding: 10px 12px;
-    border-radius: 3px;
-    background: var(--ink);
-    border: 1px solid var(--hairline);
-    color: var(--steel);
-    font-family: var(--font-body);
-    font-size: 13px;
-    line-height: 1.4;
-}
-
-#captureToggleBtn {
-    background: transparent;
-    color: var(--white);
-    border: 1px solid var(--hairline);
-}
-
-#captureToggleBtn.capture-active {
-    background: var(--red);
-    color: var(--white);
-    border-color: var(--red);
-}
-
-#captureToggleBtn:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
 }
 
 /* Generic modal shell — used by the missing-camera alert, confirm

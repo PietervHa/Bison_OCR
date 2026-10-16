@@ -14,7 +14,6 @@ from pathlib import Path
 from backend.core import auth, db
 from backend.core.config_loader import cfg
 from backend.utils.roi import draw_roi
-from QC_tools.capture_dataset import DatasetCapture
 import time
 
 
@@ -93,10 +92,6 @@ class LoadClassifierBody(BaseModel):
     model_path: str = ""
 
 
-class DatasetCaptureBody(BaseModel):
-    label: str = ""
-
-
 def create_app(camera, app_state) -> FastAPI:
     app = FastAPI()
 
@@ -114,9 +109,6 @@ def create_app(camera, app_state) -> FastAPI:
 
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-    # shared DatasetCapture instance for the lifetime of this app
-    dataset_capture = DatasetCapture()
 
     JPEG_QUALITY = int(cfg.get("hmi", {}).get("stream_quality", 75))
 
@@ -380,42 +372,6 @@ def create_app(camera, app_state) -> FastAPI:
             return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
         app_state.reset_counters()
         return {"status": "counters reset"}
-
-    @app.post("/dataset/capture")
-    def dataset_capture_route(body: DatasetCaptureBody, request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False, "error": "Not in maintenance mode"})
-        label = body.label.lower()
-        if label not in ("ok", "defective"):
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "error": "label must be 'ok' or 'defective'"},
-            )
-
-        frame = camera.get_frame()
-        if frame is None:
-            return JSONResponse(
-                status_code=500,
-                content={"success": False, "error": "no frame available"},
-            )
-
-        # apply the same rotation logic as DatasetCapture
-        rotated = dataset_capture._apply_rotation(frame)
-
-        try:
-            dataset_capture._save_frame(rotated, label)
-        except Exception as exc:
-            return JSONResponse(status_code=500, content={"success": False, "error": str(exc)})
-
-        return {
-            "success": True,
-            "ok": dataset_capture.counters.get("ok", 0),
-            "defective": dataset_capture.counters.get("defective", 0),
-        }
-
-    @app.get("/dataset/counts")
-    def dataset_counts():
-        return dataset_capture.counters
 
     @app.get("/analytics")
     def analytics():

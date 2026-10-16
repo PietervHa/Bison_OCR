@@ -44,51 +44,10 @@ data/dataset_split/
 
 The training script uses the `train` and `val` splits. The `test` split is kept for your own later evaluation.
 
-### Step 1: Capture images
+### Train the classifier
 
-Use the capture tool to collect labeled images:
-
-```powershell
-python .\tools\capture_dataset.py
-```
-
-During capture:
-
-- Press `1` to save an `ok` sample.
-- Press `2` to save a `defective` sample.
-- Press `w` to rotate the preview by 90°.
-- Press `q` to quit.
-
-Images are saved under:
-
-```text
-data/dataset/ok/
-data/dataset/defective/
-```
-
-### Step 2: Split the dataset
-
-Create train/validation/test folders:
-
-```powershell
-python .\tools\split_dataset.py
-```
-
-By default, the splitter reads from `data/dataset` and writes to `data/dataset_split`.
-
-### Step 3: Train the classifier
-
-Train the model with the fine-tuning script:
-
-```powershell
-python .\tools\train_classifier.py
-```
-
-Useful options:
-
-```powershell
-python .\tools\train_classifier.py --epochs 10 --batch-size 8 --base-model facebook/convnextv2-tiny-22k-224
-```
+Use an external training workflow to produce the classifier model, then configure its path in
+`config/default.yaml`.
 
 Training output is saved to:
 
@@ -295,5 +254,4 @@ In other words:
 - **`no_model`**: no classifier is loaded, or the selected backend does not support classifier loading.
 - **Roboflow startup validation error**: verify that `roboflow.model` exists under `roboflow.models` and that the selected profile has non-empty `api_key`, `workspace`, and `workflow`.
 - **Unexpected `NOK` results**: check `confidence_threshold` and confirm the model produces the expected label names.
-
 

@@ -22,8 +22,7 @@ The Flask web framework (synchronous) can become a bottleneck under high polling
 A proof of concept was already considered during the implementation phase; the architecture is well suited for this migration.
 
 ### 3. Expand dataset for the classifier
-The current classifier was trained on a relatively small dataset of OK and defective products from a single product type. When new product types or packaging variants are introduced, the dataset must be expanded and the model retrained.  
-`tools/capture_dataset.py` and `tools/train_classifier.py` are already in place for this purpose.
+The current classifier was trained on a relatively small dataset of OK and defective products from a single product type. When new product types or packaging variants are introduced, the dataset must be expanded and the model retrained.
 
 ### 4. Database storage for inspection results
 Inspection results are currently stored as JSONL files per day in `data/results/`. For long-term analysis and integration with a MES or ERP system, storage in a database (e.g. SQLite or PostgreSQL) is more suitable.  

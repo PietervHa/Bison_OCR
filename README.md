@@ -82,36 +82,14 @@ VisionSoftwareMDE/
 ├── frontend/           # Web dashboard (Flask + HTML/JS)
 ├── config/             # Configuration file (YAML)
 ├── data/
-│   ├── dataset/        # Images for classifier training
 │   ├── results/        # Inspection results per day (JSONL)
 │   ├── templates/      # Reference images for template matching
 │   └── logs/           # Log files
 ├── models/             # Trained models (classifier, YOLO)
-├── tools/              # Utility scripts: capture dataset, split, train
 ├── benchmarks/         # Speed measurement OCR and object detection
 ├── tests/              # Test scripts
 └── docs/               # Extended documentation
 ```
-
----
-
-## Training the classifier
-
-```powershell
-# 1. Capture images (OK and defective)
-python .\tools\capture_dataset.py
-
-# 2. Split dataset (train/val/test)
-python .\tools\split_dataset.py
-
-# 3. Train model
-python .\tools\train_classifier.py
-```
-
-The trained model is saved to `models/classifier/final/`.  
-See `docs/classifier-and-object-detection.md` for more information.
-
----
 
 ## PLC connection (TCP)
 
