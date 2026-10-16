@@ -6,10 +6,6 @@ management, vision processing, the TCP trigger server for PLC integration,
 and the web interface.
 """
 
-import os
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-os.environ.setdefault("KMP_BLOCKTIME", "0")
-
 import threading
 import keyboard
 import uvicorn
@@ -37,13 +33,11 @@ def _process_vision_result(result, trigger_time, app_state):
         # Calculate total cycle time from trigger to result
         cycle_time_ms = round((time.perf_counter() - trigger_time) * 1000, 1)
 
-        threshold = app_state.get_threshold()
         status = result["status"]
         confidence = result.get("confidence", 0)
 
         result_dict = {
             **result,
-            "confidence_threshold": threshold,
             "cycle_time_ms": cycle_time_ms  # Total time from trigger to result
         }
         app_state.update_result(result_dict)

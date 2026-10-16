@@ -178,10 +178,10 @@ class TCPTriggerServer:
         Builds the byte response sent back to the PLC for a completed vision
         cycle.
 
-        For "ocr" and "object_detection" modes this is the configured OK/NOK
-        byte string. For "ocread", a successful read (status "OK") sends the
-        raw recognized text instead (newline-terminated) so the PLC can run
-        its own comparison against the expected value. Anything that isn't a
+        A successful OCRead read (mode "ocread", status "OK") sends the
+        recognized code text (newline-terminated) so the PLC can run its own
+        comparison against the expected value. A result without mode
+        "ocread" gets the configured OK/NOK byte string. Anything that isn't a
         successful read - no text found at all, or a technical failure - is
         NOT sent as text: it gets the configured NOK byte string instead, so
         the PLC can reject the product immediately without having to treat

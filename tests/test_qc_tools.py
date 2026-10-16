@@ -1,4 +1,4 @@
-"""Tests for the QC helpers: session report and frame-folder resolution."""
+"""Tests for the QC helpers: session report and project-relative paths."""
 import json
 import tempfile
 import unittest
@@ -53,23 +53,9 @@ class SessionReportTests(unittest.TestCase):
         self.assertEqual(report.main(["does/not/exist.jsonl"]), 1)
 
 
-class TimeWindowTests(unittest.TestCase):
-    def test_folder_time_filter(self):
-        from QC_tools.compare_ocr_preprocessing import _in_window
-        p = Path("data/debug/dynamic_roi/20261013_105627_073/text_locator_search.png")
-        self.assertTrue(_in_window(p, "10:56", "10:57:37"))
-        self.assertTrue(_in_window(p, "10:56:27", None))
-        self.assertFalse(_in_window(p, "10:57", None))
-        self.assertFalse(_in_window(p, None, "10:56:20"))
-
-
-class FrameFolderTests(unittest.TestCase):
-    def test_missing_folder_says_where_it_looked(self):
-        from QC_tools import compare_ocr_preprocessing as tool
-        self.assertIsNone(tool._resolve_frames_root(Path("no/such/folder")))
-
+class ProjectPathTests(unittest.TestCase):
     def test_relative_debug_dir_is_project_root_relative(self):
-        from backend.detection.ocr.paddle_ocr import PROJECT_ROOT, resolve_project_path
+        from backend.detection.ocread.engine import PROJECT_ROOT, resolve_project_path
         self.assertEqual(Path(resolve_project_path("data/debug/dynamic_roi")), PROJECT_ROOT / "data/debug/dynamic_roi")
         absolute = str(Path.cwd().resolve())
         self.assertEqual(resolve_project_path(absolute), absolute)

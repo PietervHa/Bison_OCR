@@ -1,5 +1,5 @@
 """
-Tests for backend/detection/ocr/dot_text.py and its use in OCRead.
+Tests for backend/detection/ocr/dot_text.py (used by the font reader).
 
 Guards against the "4113 08:2" failure: a cap rib's dark shadow edge running
 through a printed character, and rib handling that erases the character
@@ -8,7 +8,6 @@ along with the rib. Synthetic crops only - no OCR engine needed.
 Run with:  python -m unittest tests.test_dot_text
 """
 import unittest
-from unittest import mock
 
 import cv2
 import numpy as np
@@ -113,53 +112,6 @@ class CleanDotTextTests(unittest.TestCase):
         self.assertIn("lines", debug)
 
 
-class _CapturingWorker:
-    def __init__(self, **kwargs):
-        self.frames = []
-
-    def ocr(self, frame, timeout=None):
-        self.frames.append(frame)
-        return [{"text": "4113 08:26", "confidence": 0.99}]
-
-
-class OCReadRoutingTests(unittest.TestCase):
-    def _engine(self, dot_text_enabled, derib_enabled):
-        from backend.detection.ocr import paddle_ocr
-        with mock.patch.object(paddle_ocr, "PaddleOCRWorker", _CapturingWorker):
-            engine = paddle_ocr.PaddleOCR(app_state=None)
-        engine.dynamic_roi_debug_dir = None
-        engine.dot_text_enabled = dot_text_enabled
-        engine.dot_text_cfg = {}
-        engine.derib_enabled = derib_enabled
-        # These tests cover the raw-read path; validation has its own tests.
-        engine.validator = None
-        engine.consensus_variants = [None]
-        return engine
-
-    def _frame(self):
-        frame = np.full((480, 744, 3), BG, np.uint8)
-        frame[150:300, 200:460] = _crop()
-        return frame
-
-    def test_dot_text_replaces_derib_and_feeds_a_clean_render(self):
-        engine = self._engine(dot_text_enabled=True, derib_enabled=True)
-        with mock.patch.object(engine, "_derib_crop", side_effect=AssertionError("derib must not run")):
-            result = engine.read(self._frame())
-        self.assertEqual(result["text"], "4113 08:26")
-        sent = engine._paddle.frames[0]
-        self.assertGreaterEqual(float(np.median(sent)), 250, "recognizer should get dark text on white")
-
-    def test_previous_path_still_available_when_disabled(self):
-        engine = self._engine(dot_text_enabled=False, derib_enabled=True)
-        with mock.patch.object(engine, "_derib_crop", wraps=engine._derib_crop) as derib:
-            engine.read(self._frame())
-        derib.assert_called_once()
-
-    def test_plain_ocr_mode_is_unaffected(self):
-        engine = self._engine(dot_text_enabled=True, derib_enabled=False)
-        with mock.patch("backend.detection.ocr.paddle_ocr.clean_dot_text",
-                        side_effect=AssertionError("dot_text is OCRead-only")):
-            engine.run(self._frame())
 
 
 if __name__ == "__main__":

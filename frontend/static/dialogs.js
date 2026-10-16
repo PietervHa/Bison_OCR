@@ -112,10 +112,9 @@ function showConfirmDialog(opts) {
 }
 
 /* ---------- Login dialog ----------
-   onSubmit(username, password) must return { ok: bool, message?: string }.
-   On failure the dialog stays open and shows the message inline, so a
-   wrong password doesn't force re-typing the username. Resolves true on
-   successful login, false if the user cancels. */
+   onSubmit(password) must return { ok: bool, message?: string }.
+   On failure the dialog stays open and shows the message inline.
+   Resolves true on successful login, false if the user cancels. */
 function showLoginDialog(onSubmit) {
     return new Promise((resolve) => {
         const overlay = _buildOverlay();
@@ -124,10 +123,6 @@ function showLoginDialog(onSubmit) {
         box.innerHTML = `
             <h2>Maintenance Login</h2>
             <div class="login-error" hidden></div>
-            <div class="login-field">
-                <label for="loginUsernameInput">Username</label>
-                <input type="text" id="loginUsernameInput" autocomplete="username">
-            </div>
             <div class="login-field">
                 <label for="loginPasswordInput">Password</label>
                 <input type="password" id="loginPasswordInput" autocomplete="current-password">
@@ -138,7 +133,6 @@ function showLoginDialog(onSubmit) {
             </div>
         `;
 
-        const userInput = box.querySelector("#loginUsernameInput");
         const passInput = box.querySelector("#loginPasswordInput");
         const errorEl = box.querySelector(".login-error");
         const submitBtn = box.querySelector(".login-submit");
@@ -159,10 +153,8 @@ function showLoginDialog(onSubmit) {
 
         async function submit() {
             if (submitting) return;
-            const username = userInput.value.trim();
             const password = passInput.value;
 
-            if (!username) { showFieldError("Username cannot be empty."); userInput.focus(); return; }
             if (!password) { showFieldError("Password cannot be empty."); passInput.focus(); return; }
 
             hideFieldError();
@@ -170,7 +162,7 @@ function showLoginDialog(onSubmit) {
             submitBtn.disabled = true;
             submitBtn.textContent = "Logging in...";
             try {
-                const result = await onSubmit(username, password);
+                const result = await onSubmit(password);
                 if (result && result.ok) {
                     cleanup(true);
                     return;
@@ -194,6 +186,6 @@ function showLoginDialog(onSubmit) {
         submitBtn.addEventListener("click", submit);
         overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(false); });
 
-        userInput.focus();
+        passInput.focus();
     });
 }

@@ -1,11 +1,11 @@
 """
 backend/detection/ocr/text_locator.py
 
-Classical-CV dynamic text-region locator (OCRead mode only).
+Classical-CV dynamic text-region locator for OCRead.
 
 The printed dot-matrix text on the bottle cap ("3030 22:42" / "BB 02/25")
 does not land in the same spot on every bottle, so a single static
-cfg["roi"] box misses it whenever the cap is rotated/placed differently
+box would miss it whenever the cap is rotated/placed differently
 under the camera. This module searches a (looser) region of the frame for
 the printed text and returns its bounding box, so the OCR crop always
 tracks the actual text instead of a fixed rectangle.
@@ -32,7 +32,7 @@ No trained model involved. Two stages:
 
 Tunable entirely through cfg["ocr"]["dynamic_roi"] (see config/default.yaml).
 Returns None when nothing plausible is found, so the caller can fall back
-to the static ROI.
+to reading the full frame.
 """
 
 from __future__ import annotations
@@ -314,9 +314,8 @@ def _normalize_rect_angle(rw: float, rh: float, angle: float) -> tuple[float, fl
     the result also flipped back and forth around that threshold.) Taking
     the smaller of the two turns means any line within +/-90 degrees of
     upright always comes out upright; only text that is genuinely more
-    than 90 degrees rotated comes out flipped, which is what the
-    orientation retry in paddle_ocr.py and PaddleOCR's textline
-    orientation classifier are for.
+    than 90 degrees rotated comes out flipped, which the font reader
+    handles by trying both orientations (font_reader.py).
     """
     if rw < rh:
         rw, rh = rh, rw
@@ -358,10 +357,10 @@ def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0
     smaller rotation (see _normalize_rect_angle), so text within +/-90
     degrees of upright always comes out upright. Text rotated by more than
     that (a cap that is genuinely upside-down under the camera) still
-    comes out upside-down - that residual case is what PaddleOCR's
-    use_angle_cls and the orientation retry in paddle_ocr.py are for. The
-    stages are complementary: this function handles "which way is the text
-    tilted", the later stages handle "is it upside down".
+    comes out upside-down - that residual case is handled by the font
+    reader, which tries both orientations (font_reader.py). The stages are
+    complementary: this function handles "which way is the text tilted",
+    the font reader handles "is it upside down".
 
     Returns None if the rect is degenerate or falls entirely outside frame.
     """
@@ -554,8 +553,8 @@ def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6
     to be found as one segment at all if min_length were passed straight
     into the Hough call. It gets a low, permissive value instead so Hough
     can actually find candidate segments; min_length is enforced only in
-    the filter loop below. See the near-identical bug (and the real crop
-    it was confirmed against) in paddle_ocr.py's _derib_crop().
+    the filter loop below. (The same bug was found on a real crop in the
+    former rib-inpainting step.)
     """
     lines = cv2.HoughLinesP(mask, 1, np.pi / 180, threshold=60, minLineLength=30, maxLineGap=15)
     if lines is None:

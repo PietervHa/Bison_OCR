@@ -1,11 +1,8 @@
 """
 Result Writer
 
-Saves vision processing results to the SQL database (see backend.core.db)
-and, as a lightweight local backup, to a daily JSONL file. The two writes
-are independent — a failure in one is logged but does not prevent the
-other, so a temporary database hiccup (relevant once this points at a
-networked MSSQL server) can't silently lose an inspection result.
+Saves vision processing results to a daily JSONL file
+(<output.result_dir>/<date>.jsonl, data/results by default).
 """
 
 import json
@@ -14,7 +11,6 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from backend.core import db
 from backend.core.config_loader import cfg
 
 log = logging.getLogger(__name__)
@@ -30,16 +26,10 @@ if not _output_dir.is_absolute():
 
 def save_result(result: dict):
     """
-    Saves a vision processing result to the database, and as a backup to
-    a daily JSONL file.
+    Appends a vision processing result to the daily JSONL file.
     """
     now = datetime.now()
     result["timestamp"] = now.isoformat()
-
-    try:
-        db.insert_result(result)
-    except Exception:
-        log.exception("Failed to write result to the database; JSONL backup will still be attempted")
 
     with _write_lock:
         try:
@@ -49,4 +39,4 @@ def save_result(result: dict):
                 handle.write(json.dumps(result, ensure_ascii=False))
                 handle.write("\n")
         except Exception:
-            log.exception("Failed to write result to JSONL backup")
+            log.exception("Failed to write result to JSONL file")

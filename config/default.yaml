@@ -1,114 +1,32 @@
-# Vision Software Configuration
-# Default configuration for the machine vision application
+# OCRead configuration
+# Default configuration for the bottle-cap code reader
 
 # Top-level settings
-vision_mode: "ocread"  # valid values: "ocr" (default, backward compatible), "object_detection", "ocread"
 machine_id: "default"
-confidence_threshold: 0.8
 
-# Region of Interest (ROI) settings
-roi:
-  x_start: 0.2
-  y_start: 0.7
-  x_end: 0.8
-  y_end: 0.9
-
-# OCR settings
+# OCRead settings
 ocr:
-  engine: "paddleocr"   # valid values: "tesseract" (default), "paddleocr"
-  keywords:
-    - "Made in Germany"
-  # Regex matches dates in DD/MM/YYYY or MM/DD/YYYY format
-  date_regex: '\b\d{2}/\d{2}/\d{4}\b'
-  preprocess: "fast"  # valid values: "fast" (default), "accurate"
-
-  # downscale/min_dim shrink the crop before inference to save time.
+  # downscale/min_dim shrink the located crop before it is read.
   # min_dim is the floor they will never shrink below - anything with a
-  # short side already at or under it passes through untouched.
-  #
-  # Raised from 240 to 480 deliberately. Character pixel height is the
-  # binding constraint on this application right now: measured directly
-  # off a real crop, characters are ~17px tall, where the recognizer
-  # wants 32px+ - which is exactly why a "3" reads as an "8" (at this
-  # size they differ by a couple of pixels of gap on the left side).
-  # The fix for that is optical (camera closer / longer lens), but with
-  # min_dim at 240 that fix would have been silently cancelled: any crop
-  # arriving taller than 240px got squashed straight back down to 240,
-  # throwing away exactly the detail the optics just gained. Today's
-  # crops are ~153px short side, so this changes nothing yet - it just
-  # makes sure the ceiling isn't there when the optics improve.
-  #
-  # If cycle time becomes a problem again once crops get bigger, prefer
-  # lowering this back down over living with soft characters - but check
-  # the slow-cycle stage breakdown first (ocr.slow_cycle_log_threshold_ms)
-  # rather than assuming crop size is the cause.
+  # short side already at or under it passes through untouched. Today's
+  # crops are ~153px short side, so with min_dim 480 nothing is shrunk;
+  # the floor keeps detail from being thrown away if the optics improve.
   downscale: 0.6
   min_dim: 480
-  psm: 7
-  oem: 3
-  whitelist: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789."
-  disable_dawgs: true
-  tesseract_path: "C:/Program Files/Tesseract-OCR/tesseract.exe"
-  # PaddleOCR only: initializes and runs the text-angle classifier so rotated
-  # or unevenly-oriented characters (e.g. dot-print/pin-stamped text) are
-  # rotated upright before recognition instead of being misread.
-  use_angle_cls: true
 
-  # PaddleOCR only: CPU thread count for the underlying inference engine.
-  # Worth experimenting with (try matching your machine's physical core
-  # count) once enable_mkldnn below is confirmed working - not touched as
-  # part of the speed investigation below, since enable_mkldnn and model
-  # tier were the two levers with clear evidence behind them.
-  cpu_threads: 4
-
-  # Any OCRead/OCR cycle slower than this (in ms) gets its full internal
-  # stage timing (roi_ms/derib_ms/ocr_ms/orientation_retry_ms/
-  # total_ocr_call_ms) written to vision.log as a WARNING automatically -
-  # no need to run the benchmark script or pass profile=True to catch a
-  # spike happening live. Added specifically because the last few multi-
-  # second spikes weren't explained by anything found so far (they didn't
-  # correlate with the orientation retry firing) - next time one happens,
-  # search vision.log for "PaddleOCR slow cycle" and the breakdown will
-  # show whether the time went into Paddle's own compute (ocr_ms) or
-  # somewhere it shouldn't have, which points at IPC/system contention
-  # instead.
-  slow_cycle_log_threshold_ms: 800
-
-  # PaddleOCR only: longest a single inference call may take before the
-  # worker process is treated as hung, terminated and restarted on the next
-  # cycle (the cycle itself is reported NOK with failure_reason
-  # "ocr_engine_error"). Normal calls are well under 1s and the slowest
-  # recorded spike was ~3.3s, so 10s only fires on a genuinely stuck
-  # worker. Keep this above anything a legitimate cycle can take; note the
-  # PLC already gets its NOK after trigger.timeout_s regardless.
-  inference_timeout_s: 10
-
-  # PaddleOCR only: characters OCR output may contain. Tokens with none of
-  # these are dropped as noise; any other disallowed character inside a
-  # token is replaced with "?" so the PLC comparison fails safely instead of
-  # silently matching. Needed because pinning the model names below makes
-  # PaddleOCR ignore lang="en" and use its multilingual dictionary, which
-  # turns specks into CJK characters. Set to "" to disable the filter.
-  allowed_chars: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :/.-'
-
-  # OCRead read validation (backend/detection/ocr/code_validator.py).
-  # Without it, ANY recognized text was status OK and went to the PLC -
-  # including "4113 08:2", "08.26", "B8 05/26". With it, a read is only OK
-  # when it fits the print format, with enough confidence, and enough
-  # independently preprocessed reads agree; otherwise NOK with a reason
-  # (format_mismatch / low_confidence / invalid_value / no_consensus), shown
-  # on the HMI together with what was read. On OK the PLC receives the
+  # Read validation (backend/detection/ocr/code_validator.py) and the
+  # font reader that produces the code (backend/detection/ocr/font_reader.py,
+  # a classifier trained on this printer's 5x7 dot font, including
+  # characters with a cap rib through them). Leave-one-bottle-out test on
+  # 83 real frames: 73 correct, 6 wrong, 4 rejected. ~0.4 s per bottle.
+  #
+  # A read is only OK when it fits the print format; otherwise NOK with a
+  # reason (format_mismatch / low_confidence / invalid_value /
+  # no_text_detected), shown on the HMI. On OK the PLC receives the
   # canonical code, e.g. "4113 08:26 BB 05/26" (always this spacing).
+  # If the font reader can't be loaded or doesn't support the template,
+  # every read is NOK with failure_reason ocr_engine_error.
   read_validation:
-    enabled: true
-    # Which reader produces the code:
-    #   font   - classifier trained on this printer's 5x7 dot font, including
-    #            characters with a cap rib through them (font_reader.py).
-    #            Leave-one-bottle-out test on 83 real frames: 73 correct,
-    #            6 wrong, 4 rejected (PaddleOCR on the same bottles mostly read
-    #            the 6 under the rib as 5). ~0.4 s per bottle.
-    #   paddle - PaddleOCR with the consensus settings below (previous).
-    reader: font               # font = trained dot-font reader (parked: it fills covered/missing digits)
     font_reader:
       model: ''                   # '' = backend/detection/ocr/models/font_reader.npz
       # To check on the line that it READS rather than recalls known codes:
@@ -134,9 +52,9 @@ ocr:
     # Optional regex the canonical code must fully match (value sanity:
     # hour 00-23, minute 00-59, month 01-12). '' to disable.
     value_pattern: '^\d{4} ([01]\d|2[0-3]):[0-5]\d BB (0[1-9]|1[0-2])/\d{2}$'
-    # Every token used for the code must be at least this confident.
-    # Calibrate on real frames (QC_tools/compare_ocr_preprocessing.py prints
-    # the confidences); good reads in the results DB score 0.96-1.0.
+    # Template matching settings (code_validator.py). The font reader's
+    # lines are checked at confidence 1.0, so min_confidence never rejects
+    # them; its own gates are min_literal_score / min_digit_confidence above.
     min_confidence: 0.80
     # Letter->digit look-alike fixes allowed in digit positions (O->0, B->8,
     # ...). Digits are never changed into other digits.
@@ -144,87 +62,13 @@ ocr:
     # Extra tokens next to the code that may be ignored (embossed "PE/PA",
     # a stray "."). Text is never cut out of the middle of a token.
     max_ignored_tokens: 3
-    consensus:
-      # Accuracy first (2026-10): every bottle is read with 9 variants of the
-      # dot-text method - same cleanup, slightly different input (2x / 3x
-      # scale, crop tilted +/-3 deg, dots bridged) - so their mistakes are
-      # independent and outvoted. OK only when >= min_agree reads give the
-      # identical code AND no other code ties it.
-      #
-      # Bench (reference frame + real rib profile composited through every
-      # part of the print, 103 frames, PP-OCRv4 stand-in recognizer):
-      #   previous default (exact 2-of-3, old validator)  86 correct, 0 wrong, 17 rejected
-      #   this (exact 3-of-9, read all)                    96 correct, 0 wrong,  7 rejected
-      #   min_agree 2..4 all give 96 - not a knife-edge setting.
-      #
-      # Also available, NOT recommended on rib-crossed print:
-      #   classic, classic_derib       - OCR-mode CLAHE preprocessing on the crop
-      #   region, full_frame           - PaddleOCR's own detector on a wide box / the whole frame
-      #   ocr_pipeline                 - exactly what the OCR mode reads (static roi box)
-      #   region_dot                   - wide box with dot-text cleanup
-      # On the bench these read the 6 printed over the rib as "08:25" -
-      # confidently and consistently (classic: 67 of 103 frames), so adding
-      # them to the vote let wrong codes through (60 correct, 8 WRONG).
-      # QC_tools/compare_ocr_preprocessing.py reports every variant's own
-      # accuracy on your real frames - check there before adding any.
-      variants: [dot_divide, dot_subtract, dot_divide_x3, dot_subtract_x3,
-                 dot_divide_tilt_p3, dot_divide_tilt_m3, dot_subtract_tilt_p3,
-                 dot_subtract_tilt_m3, dot_divide_bridge]
-      fusion: exact          # exact = whole-code agreement; position_vote = per-character vote
-      min_agree: 3
-      # false = read all variants before deciding (the measured rule above,
-      # ~9 OCR calls per bottle). true = stop at the first min_agree agreeing
-      # reads: about 3x faster on clean bottles, but can't see a tie.
-      early_stop: false
-      # position_vote only: reads that must fit the template, and the weighted
-      # share each character's winner needs (0.6: 97/0/6, 0.7: 95/0/8, 0.8: 89/0/14).
-      min_reads: 3
-      min_position_share: 0.7
-      # region / region_dot only: margin around the located text, as a
-      # fraction of the text block size.
-      region_margin_frac: 0.6
 
-  # PaddleOCR only: enables MKL-DNN (oneDNN) CPU acceleration.
-  #
-  # true here assumes paddlepaddle==3.2.2 (not 3.3.x) - see the pip
-  # commands below. paddlepaddle==3.3.0/3.3.1 has a confirmed upstream
-  # regression that makes enable_mkldnn=True crash on every single
-  # inference call: "NotImplementedError: ConvertPirAttribute2RuntimeAttribute
-  # not support [pir::ArrayAttribute<pir::DoubleAttribute>]" - a bug in the
-  # PIR-to-oneDNN conversion layer, not anything in this app. Confirmed
-  # against PaddlePaddle's own issue tracker (PaddlePaddle/Paddle#77340):
-  # "This worked correctly in PaddlePaddle 3.2.x and earlier."
-  #
-  #     pip uninstall -y paddlepaddle
-  #     pip install paddlepaddle==3.2.2
-  #     pip show paddlepaddle   # confirm it says 3.2.2 before relying on this
-  #
-  # If you ever roll back to 3.3.x for any reason, set this back to false
-  # first - otherwise OCRead goes back to finding 0 detections every cycle.
-  enable_mkldnn: true
-
-  # PaddleOCR only: pins a specific model tier instead of accepting
-  # whichever one PaddleOCR defaults to for lang="en" (currently
-  # PP-OCRv6_medium - the largest and slowest of the three PP-OCRv6
-  # tiers). Leave both blank to fall back to that default.
-  #
-  # Set below to PP-OCRv6_small as a starting point for the accuracy/speed
-  # trade-off - re-run benchmarks/ocr_benchmark.py (pass profile=True is
-  # already wired up there) against real bottle-cap frames to compare
-  # small vs medium vs PP-OCRv5_server on your own accuracy bar before
-  # settling on one; "sweet spot" is a claim to verify against your own
-  # data, not assume. Available *_det/*_rec tiers as of PaddleOCR 3.7:
-  # PP-OCRv6_{tiny,small,medium}, PP-OCRv5_{mobile,server}.
-  text_detection_model_name: "PP-OCRv6_small_det"
-  text_recognition_model_name: "PP-OCRv6_small_rec"
-
-  # OCRead mode only: locates the printed text block via classical CV
-  # (dark-ink blob detection + clustering) and deskews it to horizontal
-  # before handing it to PaddleOCR, instead of relying on the static roi:
-  # box above - bottles don't land in the same position/orientation on the
-  # line, so a fixed box misses text as often as it catches it. See
+  # Locates the printed text block via classical CV (dark-ink blob
+  # detection + clustering) and deskews it to horizontal before it is
+  # read - bottles don't land in the same position/orientation on the
+  # line, so a fixed box would miss text as often as it catches it. See
   # backend/detection/ocr/text_locator.py. If this stays disabled (or is
-  # missing), OCRead falls back to running OCR on the entire raw frame,
+  # missing), OCRead falls back to reading the entire raw frame,
   # which is far less reliable - watch the log for the
   # "dynamic ROI disabled" warning if reads seem to be failing a lot.
   dynamic_roi:
@@ -322,114 +166,8 @@ ocr:
     line_extend_max_perp_px: 18
     line_extend_max_gap_px: 90
     # Padding in pixels added around the detected text block before
-    # cropping, so characters at the edge aren't clipped. Also gives
-    # PaddleOCR's own internal text detector some non-text margin to work
-    # with - a very tight crop (text touching the crop edge) makes that
-    # detector less reliable, which is part of why this is now 25 rather
-    # than a bare-minimum value: the static roi: box used by the plain
-    # "ocr" mode is naturally generous (a fixed, hand-picked region), and
-    # this brings dynamic ROI a bit closer to that instead of cropping as
-    # tight as possible.
+    # cropping, so characters at the edge aren't clipped.
     padding_px: 25
-
-    # Rib inpainting - detects and removes the mold rib crossing through
-    # the deskewed crop before recognition (see _derib_crop() in
-    # paddle_ocr.py).
-    #
-    # Re-enabled after finding and fixing a real bug: derib was passing
-    # min_length_frac's pixel value directly as Hough's own minLineLength
-    # parameter, which doesn't just filter results - it changes how Hough
-    # merges/detects segments in the first place, so a real rib broken up
-    # by antialiasing or mask noise could fail to be found as one segment
-    # at all. Confirmed directly on a real crop: a genuine 135px rib went
-    # completely undetected at the old 0.6 fraction (169px required on
-    # that crop), and even lowering the fraction didn't help until Hough's
-    # own minLineLength was decoupled from the length filter (see the code
-    # comment in _derib_crop()). In other words: on many real crops this
-    # was silently doing nothing at all, in either direction - which is
-    # also why turning it on/off across different sessions kept producing
-    # inconsistent, hard-to-read results. That inconsistency wasn't derib
-    # actively helping or hurting - it mostly wasn't running.
-    #
-    # Important caveat found in the same test: even fixed and firing
-    # correctly, derib only helps the subset of frames where a rib is
-    # actually the reason a character looks soft - checked one real "3030"
-    # misread directly and the rib Hough found was running along the
-    # crop's edge, nowhere near the leading digit, which stayed just as
-    # soft after inpainting as before. Don't expect this alone to fix the
-    # leading-digit accuracy problem - re-test with debug_save on and
-    # judge it on whatever fraction of cycles actually have a rib crossing
-    # the ink, not on the leading-digit problem as a whole.
-    #
-    # 2026-10: turned OFF. Diagnosed on a real frame: the rib's shadow edge
-    # runs straight through the trailing "6" of "4113 08:26", and inpainting
-    # a band along that edge erased the 6's stroke with it - which is where
-    # the frequent "4113 08:2" reads came from. Superseded by dot_text below,
-    # which removes ribs by shape and keeps ink printed on them. (Ignored
-    # anyway while dot_text.enabled is true.)
-    derib_enabled: false
-    derib_blackhat_kernel: 25
-    derib_threshold: 32
-    derib_min_length_frac: 0.4
-    derib_thickness: 7
-
-    # Dot-text cleanup (see backend/detection/ocr/dot_text.py). Separates
-    # the print from the plastic by shape: removes every straight structure
-    # longer than line_min_length_px (rib edges, mold lines), keeps the
-    # short dots/strokes - including ones printed on top of a rib - and
-    # re-renders them as dark text on white, normalised per region so faint
-    # parts of the print aren't lost. Replaces derib and CLAHE for OCRead.
-    #
-    # Measured on the 4113 08:26 / BB 05/26 reference frame (rotated cap
-    # orientations, two camera scales, low-contrast and noisy variants;
-    # PP-OCRv4 as a stand-in recognizer): exact reads 3/44 -> 44/44, and
-    # 1/32 -> 30/32 on held-out tilts. One bottle so far - compare on your
-    # own frames with QC_tools/compare_ocr_preprocessing.py.
-    #
-    # Pixel values are at camera resolution, before any upscaling.
-    dot_text:
-      enabled: true
-      ink_kernel_px: 19         # wider than a dot/stroke, narrower than shading
-      line_min_length_px: 65    # > ~2.5 character heights, < visible rib length in the crop
-      line_angles: 36           # directions checked (every 5 deg); 12 left rib remnants that turned 6 into 5
-      local_window_px: 21       # ~1 character height
-      min_ref_frac: 0.4
-      ink_floor: 0.1            # 0.05-0.15 all scored well; 0.35 lost most of the print
-      # "Slight defocus reads better" in software: merges separate dots into
-      # strokes, applied only to the cleaned text. 0 = off. Did not help on
-      # the reference frame (dots already merged there); worth trying 0.5-1.0
-      # on sharp frames where individual dots are visible.
-      bridge_sigma_px: 0.0
-
-    # Orientation retry - re-runs recognition on a 180-degree-flipped copy
-    # of the crop, since deskew_crop() only resolves line tilt, not
-    # upside-down-ness (see _recognize() in paddle_ocr.py).
-    #
-    # Left at true for now, but flagged rather than decided: a fresh
-    # 2026-08-28 55-cycle session brought the cumulative track record to
-    # 0/36 correct across every audited case where this has fired, over
-    # two independent sessions (0/13, then 0/23) - while non-retry cycles
-    # in that same session succeeded 25% of the time (8/32). The previous
-    # comment's reasoning (retry fixes orientation, just can't also fix
-    # the separate leading-digit legibility issue) still looks right on
-    # inspection - "BB 02/25" keeps reading correctly post-flip - but 0/36
-    # is a stronger number than what motivated re-enabling this last time,
-    # and the last time this was turned off, disabling it produced a
-    # worse failure mode (pure garbage on genuinely-upside-down crops)
-    # rather than a better one. Toggling this a fourth time on aggregate
-    # stats alone doesn't feel like the right call - two open questions
-    # actually decide it: (1) do bottles on the real line ever arrive
-    # genuinely upside-down, or does that only happen in hand-spun testing
-    # like this capture - if real bottles stay within a limited angle
-    # range in production, this entire trade-off may not matter there; and
-    # (2) does the PLC do an exact string match against an expected value,
-    # or something more tolerant - if it's exact-match, a legible-but-
-    # wrong-digit read and a garbled one likely both just fail the same
-    # way downstream, and this setting mostly only affects how readable
-    # the logged text is to a human, not the accept/reject outcome itself.
-    orientation_retry_enabled: true
-    orientation_retry_require_low_confidence: true
-    orientation_retry_confidence_threshold: 0.8
 
     # Debug aid: when true, writes intermediate images (blackhat mask,
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
@@ -503,49 +241,8 @@ camera:
     brightness: null
     contrast: null
 
-# Object detection settings
-object_detection:
-  # Active backend: "classifier" (local HF classifier), "roboflow" (remote API), "yolo" (local YOLO model_path), template (local template matching)
-  # Switch this to select which detection pipeline is used at runtime.
-  backend: "classifier"
-
-  # Local YOLO weights path (used when backend is set to "yolo").
-  model_path: "models/yolov8n.pt"
-  inference_size: 640
-
-  # Classifier backend settings (used when backend is "classifier").
-  classifier:
-    model_path: "./models/classifier/final"
-
-  # Template matching backend settings.
-  template:
-    # One or more reference images used for matching.
-    references:
-      - "data/templates/template_1777366974416.jpg"
-      - "data/templates/template_1777366974416_scale0_85.jpg"
-      - "data/templates/template_1777366974416_scale1_15.jpg"
-      - "data/templates/template_1777371544433.jpg"
-      - "data/templates/template_1777371544433_scale0_85.jpg"
-      - "data/templates/template_1777371544433_scale1_15.jpg"
-    match_threshold: 0.6
-    display_label: "Stiftdop"
-    # Resize incoming ROI to reference dimensions before comparison.
-    resize_to_reference: true
-
-  # Roboflow backend settings (used when backend is "roboflow").
-  roboflow:
-    # Select which Roboflow profile to use from roboflow.models.
-    model: "cola_detectie"
-    models:
-      cola_detectie:
-        api_key: "SET_VIA_ENV"
-        workspace: "pieters-workspace-kugm8"
-        workflow: "detect-count-and-visualize"
-        api_url: "https://serverless.roboflow.com"
-
 # HMI settings
 hmi:
-  debug_draw_roi: true
   enable_video_feed: true
 
 # Web settings
@@ -557,40 +254,19 @@ web:
 output:
   result_dir: "data/results"
 
-# Database settings — SQLite for now. Once MDE's MSSQL server can be
-# reached, switch the url below and nothing else needs to change:
-#   url: "mssql+pyodbc://user:password@server/db?driver=ODBC+Driver+17+for+SQL+Server"
-database:
-  url: "sqlite:///data/results.db"
-
-# Trigger settings
-# Automated long-running Q trigger for vision testing
-# Disabled by default so normal application startup is unchanged.
-trigger_test:
-  enabled: true
-  startup_delay_s: 30.0
-  interval_s: 1.0
-  max_hours: 8.0
-  max_images: 10000
-
-# Trigger settings
+# TCP trigger settings (PLC)
 trigger:
   enabled: true         # Set to true to activate TCP trigger listener
-  type: "tcp"
   host: "0.0.0.0"     # Local-only; change to 0.0.0.0 for a real PLC on the network
   port: 5001
   trigger_byte: "0x01"  # Byte the PLC sends to trigger a vision cycle
-  response_ok: "OK\n"   # Response sent back on OK result ("ocr" / "object_detection" modes)
+  response_ok: "OK\n"   # Only sent for an OK result without mode "ocread" (an OCRead OK sends the code text instead)
   response_nok: "NOK\n" # Response sent back on NOK result, and on any camera/vision failure
   timeout_s: 15.0       # Max seconds to wait for vision result before responding NOK.
-                        # 15s because OCRead reads every bottle 9x (~3s with PaddleOCR on CPU,
-                        # more with orientation retries). The PLC's receive timeout must allow it.
-  max_text_length: 64   # "ocread" only: longer reads are sent as NOK (failure_reason text_too_long); keep <= the PLC receive buffer
-  # In "ocread" mode no OK/NOK judgement is made here at all: the raw text
+                        # A font-reader read takes ~0.4 s, so this only fires on a stuck cycle.
+                        # The PLC's receive timeout must allow it.
+  max_text_length: 64   # Longer reads are sent as NOK (failure_reason text_too_long); keep <= the PLC receive buffer
+  # No OK/NOK judgement is made here for a successful read: the code text
   # read from the product is sent back instead (newline-terminated), and the
   # PLC is responsible for comparing it against the expected value.
 
-# Security settings
-# Maintenance-mode login is per-user now (see the `users` table / QC_tools/manage_users.py),
-# not a single shared password, so there's nothing to configure here.
-security: {}

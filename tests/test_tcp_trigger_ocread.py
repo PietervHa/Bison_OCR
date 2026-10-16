@@ -70,9 +70,9 @@ class OCReadResponseTests(unittest.TestCase):
         response = _server(result, recorded)._trigger_vision_and_wait()
         self.assertEqual(response, b"NOK\n")
 
-    def test_other_modes_unaffected_by_text_limit(self):
+    def test_result_without_ocread_mode_gets_plain_ok_nok(self):
         recorded = []
-        result = {"mode": "ocr", "status": "OK", "text": "X" * 200, "detections": []}
+        result = {"status": "OK", "text": "X" * 200, "detections": []}
         response = _server(result, recorded)._trigger_vision_and_wait()
         self.assertEqual(response, b"OK\n")
 

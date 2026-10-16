@@ -2,7 +2,7 @@
 Tests for the trained dot-font reader (font_reader.py) and its use in OCRead.
 
 The fixtures are real crops from the line: the "6" with a rib through it
-that PaddleOCR read as "5", crossing ribs over "3030", and an upside-down
+that a general-purpose OCR read as "5", crossing ribs over "3030", and an upside-down
 cap. (They were part of the model's training data, so these are regression
 tests of the pipeline, not an accuracy measurement - see default.yaml for
 the leave-one-bottle-out results.)
@@ -82,16 +82,11 @@ class _FakeReader:
 
 class OCReadFontModeTests(unittest.TestCase):
     def _engine(self, result):
-        from backend.detection.ocr import paddle_ocr
+        from backend.detection.ocread import engine
 
-        class NoPaddle:
-            def __init__(self, **k): pass
-            def ocr(self, *a, **k): raise AssertionError("PaddleOCR must not run in font mode")
-
-        with mock.patch.object(paddle_ocr, "PaddleOCRWorker", NoPaddle):
-            e = paddle_ocr.PaddleOCR(app_state=None)
+        e = engine.OCRead()
         e.dynamic_roi_debug_dir = None
-        e.validator = paddle_ocr.CodeTemplate(TPL, value_pattern=r"^\d{4} ([01]\d|2[0-3]):[0-5]\d BB (0[1-9]|1[0-2])/\d{2}$")
+        e.validator = engine.CodeTemplate(TPL, value_pattern=r"^\d{4} ([01]\d|2[0-3]):[0-5]\d BB (0[1-9]|1[0-2])/\d{2}$")
         e.font_reader = _FakeReader(result)
         return e
 
@@ -110,7 +105,7 @@ class OCReadFontModeTests(unittest.TestCase):
     def test_garbled_cut_is_rejected(self):
         e = self._engine(self._r("5523 07:12 BB 10/22", lit=-10.6))
         crop = np.full((144, 254, 3), 190, np.uint8)
-        e._prepare = lambda frame, dynamic_roi=False: (crop, None, {}, {"bbox": [300, 250, 460, 330]})  # print WAS found
+        e._prepare = lambda frame: (crop, None, {}, {"bbox": [300, 250, 460, 330]})  # print WAS found
         r = e.read(self._frame())
         self.assertEqual((r["failure_reason"], r["text"]), ("format_mismatch", ""))
 
@@ -136,6 +131,48 @@ class OCReadFontModeTests(unittest.TestCase):
         e = self._engine(self._r("4113 08:26 BB 05/26", conf=0.3))
         e.font_reader.min_digit_confidence = 0.5
         self.assertEqual(e.read(self._frame())["failure_reason"], "low_confidence")
+
+    def test_result_contract(self):
+        r = self._engine(self._r("4113 08:26 BB 05/26")).read(self._frame(), profile=True)
+        self.assertEqual(r["mode"], "ocread")
+        for key in ("detections", "text", "processing_time_ms", "validation", "_profile_ms"):
+            self.assertIn(key, r)
+        self.assertEqual([d["text"] for d in r["detections"]], ["4113 08:26", "BB 05/26"])
+
+
+class OCReadDefaultConfigTests(unittest.TestCase):
+    def test_default_config_loads_the_font_reader(self):
+        from backend.detection.ocread.engine import OCRead
+        e = OCRead()
+        self.assertIsNotNone(e.font_reader, e.unavailable_reason)
+        self.assertEqual(e.validator.lines, TPL)
+
+
+class OCReadUnavailableTests(unittest.TestCase):
+    """Without a usable font reader every read is a technical failure, never a guess."""
+
+    def _unavailable_engine(self, template):
+        from backend.detection.ocread import engine
+        val_cfg = {"template": template, "font_reader": {"model": ""}}
+        with mock.patch.dict(engine.cfg["ocr"], {"read_validation": val_cfg}):
+            return engine.OCRead()
+
+    def test_unsupported_template_is_an_engine_error(self):
+        from backend.core import vision
+        e = self._unavailable_engine(["AAAA ##", "BB ##"])
+        self.assertIsNone(e.font_reader)
+        r = e.read(np.full((480, 744, 3), 190, np.uint8))
+        self.assertIn("error", r)
+        n = vision._normalize_result(r)
+        self.assertEqual((n["status"], n["failure_reason"], n["text"]), ("NOK", "ocr_engine_error", ""))
+
+    def test_missing_model_is_an_engine_error(self):
+        from backend.detection.ocread import engine
+        val_cfg = {"template": TPL, "font_reader": {"model": "does/not/exist.npz"}}
+        with mock.patch.dict(engine.cfg["ocr"], {"read_validation": val_cfg}):
+            e = engine.OCRead()
+        self.assertIsNone(e.font_reader)
+        self.assertIn("could not be loaded", e.read(np.zeros((8, 8, 3), np.uint8))["error"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ the recognizer sees dark text on a flat white background - with the cap's
 molded ribs, embossing ("PE", recycling triangle) and lighting gradients
 removed - instead of the raw plastic.
 
-Why this replaces rib inpainting (paddle_ocr._derib_crop): on these caps the
+Why this replaced rib inpainting (the former derib step): on these caps the
 rib's dark shadow edge runs straight through a printed character (the
 trailing "6" of "4113 08:26" on the reference bottle). Derib found that edge
 and inpainted a 7px band along it, which erased the character's stroke with
@@ -106,8 +106,8 @@ def _line_kernels(length: int, n_angles: int) -> list:
 
 
 def upscale_factor(short_side: int) -> int:
-    """Same small-crop upscale rule as PaddleOCR._preprocess_image, so the
-    recognizer sees the same character size with either preprocessing."""
+    """Small-crop upscale rule, kept from the former PaddleOCR preprocessing
+    so the character size is the same as before."""
     if short_side >= 200:
         return 1
     return max(2, int(160 / max(1, short_side))) if short_side < 80 else 2
