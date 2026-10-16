@@ -1,0 +1,54 @@
+datasets==3.1.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+keyboard==0.13.5
+numpy==1.26.4
+opencv-python==4.10.0.84
+openpyxl==3.1.5
+pygrabber==0.2; sys_platform == "win32"
+
+# --- PaddleOCR stack ---------------------------------------------------
+# 3.x is a breaking API change from the 2.x that used to be pinned here:
+# PaddleOCR(use_angle_cls=...) became use_textline_orientation=..., and
+# .ocr(frame, cls=...) became .predict(frame) returning OCRResult objects
+# (dict subclasses exposing rec_texts / rec_scores) instead of nested
+# lists. backend/detection/ocr/paddle_worker.py is written against the 3.x
+# API and will not run on 2.x.
+paddleocr==3.7.0
+
+# DO NOT bump to 3.3.x. paddlepaddle 3.3.0/3.3.1 have a regression in the
+# PIR-to-oneDNN conversion layer that makes every inference call fail with
+#   (Unimplemented) ConvertPirAttribute2RuntimeAttribute not support
+#   [pir::ArrayAttribute<pir::DoubleAttribute>]
+# whenever MKL-DNN is enabled - which it is, via ocr.enable_mkldnn in
+# config/default.yaml, because turning it off costs multiple seconds per
+# detected text region on this CPU. Upstream report:
+# https://github.com/PaddlePaddle/Paddle/issues/77340 - the maintainers
+# confirm 3.2.x and earlier are unaffected and recommend downgrading.
+# If you ever must run 3.3.x, set ocr.enable_mkldnn to false first and
+# accept the slowdown.
+paddlepaddle==3.2.2
+
+# Pulled in automatically by paddleocr (which allows >=3.7.0,<3.8.0), but
+# pinned explicitly so a fresh install can't silently land on a different
+# patch release - this package is what actually owns the inference
+# pipeline and model resolution.
+paddlex==3.7.2
+# -----------------------------------------------------------------------
+
+Pillow==10.4.0
+pytesseract==0.3.10
+PyYAML==6.0.2
+python-dotenv==1.0.1
+pydantic==2.9.2
+requests==2.32.3
+scikit-image==0.24.0
+SQLAlchemy==2.0.51
+# When database.url in config.yaml switches to mssql+pyodbc://..., also add:
+#   pyodbc==5.x   (plus a matching "ODBC Driver 17/18 for SQL Server" install on the machine)
+inference-sdk==0.42.1
+torch==2.5.1
+torchvision==0.20.1
+tqdm==4.67.1
+transformers==4.46.3
+ultralytics==8.3.40

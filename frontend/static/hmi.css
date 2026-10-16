@@ -1,0 +1,740 @@
+/* =====================================================================
+   MDE AUTOMATION — Vision HMI
+   Design tokens derived from the MDE Automation mark: signal red EE1C25
+   on black and white. Red is reserved for one meaning throughout this
+   file: alarm, caution, or an unlocked/destructive action. It is never
+   used merely to mark "this is selected" — that's handled with an
+   inverted white/black fill instead, so red keeps its urgency.
+===================================================================== */
+
+:root {
+    --ink: #0a0a0a;
+    --panel: #161616;
+    --panel-raised: #1d1d1d;
+    --hairline: #2a2a2a;
+    --red: #ee1c25;
+    --green: #2e8b57;
+    --red-dim: #4a1113;
+    --white: #ffffff;
+    --steel: #8a8a8a;
+    --steel-dim: #5c5c5c;
+
+    --font-display: "Bahnschrift", "Arial Narrow", "Segoe UI", Arial, sans-serif;
+    --font-body: "Segoe UI", Arial, Helvetica, sans-serif;
+    --font-data: "Consolas", "Courier New", monospace;
+
+    --cut: 14px;   /* chamfer size for the signature cut-corner cards */
+    --cut-sm: 8px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--white);
+    font-family: var(--font-body);
+    display: grid;
+    grid-template-rows: auto 1fr;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* =========================
+   HEADER
+========================= */
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 24px;
+    background: #000;
+    border-bottom: 4px solid var(--hairline);
+    position: relative;
+}
+
+/* the signature stripe: the logo's own black+red base, reused as a rule */
+.app-header::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -4px;
+    height: 4px;
+    background: linear-gradient(to right, var(--hairline) 0 60%, var(--red) 60% 100%);
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.brand img {
+    height: 40px;
+    width: 40px;
+    border-radius: 3px;
+    display: block;
+}
+
+.brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.15;
+}
+
+.brand-name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 19px;
+    letter-spacing: 0.5px;
+}
+
+.brand-sub {
+    font-family: var(--font-body);
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--steel);
+    text-transform: uppercase;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.station-id {
+    font-family: var(--font-data);
+    font-size: 12px;
+    color: var(--steel);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+/* =========================
+   WORKSPACE (camera + panel)
+========================= */
+.workspace {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    min-height: 0;
+}
+
+/* Camera */
+.camera {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: stretch;
+    background: #000;
+    border-right: 1px solid var(--hairline);
+    min-height: 0;
+}
+
+.camera img {
+    flex: 1;
+    object-fit: contain;
+    width: 100%;
+    max-height: 78vh;
+    min-height: 0;
+}
+
+/* Mode overlay badge on the feed */
+.mode-overlay {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    padding: 8px 16px;
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+    z-index: 2;
+}
+
+.mode-overlay.maintenance {
+    background: var(--red);
+    color: var(--white);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.mode-overlay.production {
+    background: rgba(10, 10, 10, 0.85);
+    color: var(--white);
+    border: 1px solid var(--hairline);
+}
+
+.below-feed {
+    background: #0d0d0d;
+    border-top: 1px solid var(--hairline);
+    padding: 10px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.vision-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-body);
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--steel);
+}
+
+.mode-btn {
+    padding: 6px 16px;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
+    background: var(--panel);
+    color: var(--steel);
+    border: 1px solid var(--hairline);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.mode-btn:hover { border-color: var(--steel); color: var(--white); }
+
+/* "selected" state uses inverted white fill, not red — red stays reserved
+   for alarm/caution only */
+.mode-btn.active {
+    background: var(--white);
+    color: #000;
+    border-color: var(--white);
+}
+
+.rotate-btn {
+    margin-left: 10px;
+    background: var(--panel);
+    border-color: var(--hairline);
+    font-family: var(--font-data);
+    font-size: 13px;
+}
+
+.rotate-btn:hover { background: var(--panel-raised); border-color: var(--steel); }
+
+.dynamic-label {
+    font-family: var(--font-data);
+    font-size: 15px;
+    color: var(--white);
+    min-height: 20px;
+}
+
+.cycle-time {
+    font-family: var(--font-data);
+    font-size: 12px;
+    color: var(--steel);
+    letter-spacing: 0.5px;
+}
+
+.ocr-keyword-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-body);
+    font-size: 13px;
+    color: var(--steel);
+}
+
+.ocr-keyword-row input {
+    font-family: var(--font-data);
+    font-size: 13px;
+    padding: 6px 10px;
+    background: var(--panel);
+    color: var(--white);
+    border: 1px solid var(--hairline);
+    border-radius: 3px;
+    width: 240px;
+}
+
+.ocr-keyword-row button {
+    padding: 6px 14px;
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    background: var(--panel-raised);
+    color: var(--white);
+    border: 1px solid var(--hairline);
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.ocr-keyword-row button:hover { border-color: var(--steel); }
+
+.dataset-capture-counter {
+    font-family: var(--font-data);
+    font-size: 13px;
+    color: var(--white);
+    margin-top: 4px;
+    padding: 6px 10px;
+    background: rgba(238, 28, 37, 0.12);
+    border: 1px solid var(--red-dim);
+    border-radius: 3px;
+    letter-spacing: 0.3px;
+}
+
+/* Camera disconnected overlay */
+.camera-disconnected-overlay {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    z-index: 5;
+    pointer-events: none;
+}
+.camera-disconnected-overlay[hidden] { display: none; }
+
+.camera-disconnected-text {
+    padding: 14px 24px;
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--white);
+    background: var(--red);
+    clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+}
+
+/* =========================
+   PANEL
+========================= */
+.panel {
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.status {
+    font-family: var(--font-display);
+    font-size: 42px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    padding: 22px;
+    text-align: center;
+    clip-path: polygon(0 0, calc(100% - var(--cut)) 0, 100% var(--cut), 100% 100%, var(--cut) 100%, 0 calc(100% - var(--cut)));
+}
+
+/* OK = green. NOK = brand red. See header note. */
+.ok { background: var(--green); color: var(--white); }
+.nok { background: var(--red); color: var(--white); }
+
+.info-box {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    clip-path: polygon(0 0, calc(100% - var(--cut-sm)) 0, 100% var(--cut-sm), 100% 100%, var(--cut-sm) 100%, 0 calc(100% - var(--cut-sm)));
+    padding: 16px 18px;
+}
+
+.info-box h2 {
+    margin: 0 0 10px 0;
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--steel);
+}
+
+.detections {
+    font-family: var(--font-data);
+    font-size: 16px;
+    color: var(--white);
+    line-height: 1.6;
+}
+
+.threshold-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.threshold-row input {
+    font-family: var(--font-data);
+    font-size: 16px;
+    width: 80px;
+    padding: 6px 8px;
+    background: var(--ink);
+    color: var(--white);
+    border: 1px solid var(--hairline);
+    border-radius: 3px;
+}
+
+.threshold-row button {
+    padding: 9px 16px;
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    background: var(--panel-raised);
+    color: var(--white);
+    border: 1px solid var(--hairline);
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.threshold-row button:hover { border-color: var(--steel); }
+
+.button-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    margin-top: auto;
+    padding-top: 4px;
+}
+
+.btn {
+    padding: 12px 22px;
+    font-family: var(--font-body);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    border-radius: 3px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: filter 0.15s, border-color 0.15s;
+}
+
+.btn:hover { filter: brightness(1.15); }
+
+.btn.reset {
+    background: transparent;
+    color: var(--white);
+    border-color: var(--hairline);
+}
+.btn.reset:hover { border-color: var(--steel); }
+
+/* Production = the calm, locked-down state -> neutral, not red */
+.btn.production {
+    background: var(--white);
+    color: #000;
+}
+
+/* Maintenance = elevated access, handle with care -> red, matches the
+   maintenance mode banner */
+.btn.maintenance {
+    background: var(--red);
+    color: var(--white);
+}
+
+.btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    filter: none;
+}
+
+.footer {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--hairline);
+    font-family: var(--font-data);
+    font-size: 12px;
+    color: var(--steel-dim);
+    text-align: center;
+    letter-spacing: 0.5px;
+}
+
+/* Dataset capture */
+.dataset-capture-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.dataset-capture-header h2 { margin: 0; }
+
+.dataset-capture-header .btn {
+    padding: 8px 16px;
+    font-size: 12px;
+}
+
+.dataset-capture-instructions {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 3px;
+    background: var(--ink);
+    border: 1px solid var(--hairline);
+    color: var(--steel);
+    font-family: var(--font-body);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+#captureToggleBtn {
+    background: transparent;
+    color: var(--white);
+    border: 1px solid var(--hairline);
+}
+
+#captureToggleBtn.capture-active {
+    background: var(--red);
+    color: var(--white);
+    border-color: var(--red);
+}
+
+#captureToggleBtn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* Generic modal shell — used by the missing-camera alert, confirm
+   dialogs, and the login form (see dialogs.js) */
+.modal-overlay {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 100;
+}
+.modal-overlay[hidden] { display: none; }
+
+.modal-box {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 18px 100%, 0 calc(100% - 18px));
+    padding: 28px 36px;
+    text-align: center;
+    max-width: 420px;
+}
+
+/* destructive = alarm-toned (missing camera, "this can't be undone"
+   confirms). neutral = calm actions like logging in or starting
+   production — no reason to make those look like a warning. */
+.modal-box.destructive { border-color: var(--red-dim); }
+.modal-box.neutral { border-color: var(--hairline); }
+
+.modal-box h2 {
+    margin-top: 0;
+    font-family: var(--font-display);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--white);
+}
+.modal-box.destructive h2 { color: var(--red); }
+
+.modal-sub { color: var(--steel); font-size: 14px; }
+
+.modal-message {
+    color: var(--steel);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    text-align: left;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 22px;
+}
+
+.modal-actions .btn { padding: 10px 20px; font-size: 13px; }
+
+/* Login form (inside a .modal-box.login-box) */
+.login-box { text-align: left; max-width: 380px; }
+.login-box h2 { text-align: center; margin-bottom: 18px; }
+
+.login-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 14px;
+}
+
+.login-field label {
+    font-family: var(--font-body);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--steel);
+}
+
+.login-field input {
+    font-family: var(--font-data);
+    font-size: 15px;
+    padding: 10px 12px;
+    background: var(--ink);
+    color: var(--white);
+    border: 1px solid var(--hairline);
+    border-radius: 3px;
+}
+.login-field input:focus {
+    outline: none;
+    border-color: var(--steel);
+}
+
+.login-error {
+    background: rgba(238, 28, 37, 0.12);
+    border: 1px solid var(--red-dim);
+    color: var(--white);
+    font-family: var(--font-body);
+    font-size: 13px;
+    line-height: 1.4;
+    padding: 10px 12px;
+    border-radius: 3px;
+    margin-bottom: 14px;
+}
+.login-error[hidden] { display: none; }
+
+/* =========================
+   TOASTS
+========================= */
+.toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 380px;
+}
+
+.toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--panel-raised);
+    border: 1px solid var(--hairline);
+    border-left: 3px solid var(--steel);
+    clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+    padding: 12px 14px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s;
+}
+
+.toast.toast-show { opacity: 1; transform: translateY(0); }
+
+.toast.error { border-left-color: var(--red); }
+.toast.success { border-left-color: var(--white); }
+.toast.info { border-left-color: var(--steel); }
+
+.toast-message {
+    flex: 1;
+    font-family: var(--font-body);
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--white);
+}
+
+.toast-close {
+    background: transparent;
+    border: none;
+    color: var(--steel);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+}
+.toast-close:hover { color: var(--white); }
+
+/* Recent Logins panel (maintenance mode only) */
+.login-log-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.login-log-refresh {
+    padding: 7px 14px;
+    font-size: 12px;
+    background: var(--panel-raised);
+    color: var(--white);
+    border: 1px solid var(--hairline);
+}
+.login-log-refresh:hover { border-color: var(--steel); }
+
+.login-log-clear {
+    padding: 7px 14px;
+    font-size: 12px;
+    background: transparent;
+    color: var(--red);
+    border: 1px solid var(--red-dim);
+}
+.login-log-clear:hover { background: var(--red-dim); }
+
+.login-log-list {
+    font-family: var(--font-data);
+    font-size: 13px;
+    max-height: 160px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.login-log-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.03);
+    border-left: 2px solid transparent;
+}
+
+.login-log-user {
+    color: var(--white);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.login-log-status {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+}
+
+.login-log-time {
+    color: var(--steel);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.login-log-row.success { border-left-color: var(--white); }
+.login-log-row.success .login-log-status { color: var(--white); }
+.login-log-row.fail { border-left-color: var(--red); }
+.login-log-row.fail .login-log-status { color: var(--red); }
+
+/* =========================
+   RESPONSIVE
+========================= */
+@media (max-width: 900px) {
+    .workspace {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto;
+        overflow-y: auto;
+    }
+    .camera { border-right: none; border-bottom: 1px solid var(--hairline); }
+    .camera img { max-height: 50vh; }
+}
+
+/* Respect reduced-motion preferences */
+@media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+}

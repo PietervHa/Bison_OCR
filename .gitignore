@@ -1,0 +1,132 @@
+benchmarks/benchmark_results/object_detection_benchmark_20260310_143237.json
+benchmarks/benchmark_results/object_detection_benchmark_20260310_145520.json
+benchmarks/benchmark_results/object_detection_benchmark_20260310_154005.json
+benchmarks/benchmark_results/object_detection_benchmark_20260310_154129.json
+benchmarks/benchmark_results/object_detection_benchmark_20260310_154700.json
+benchmarks/benchmark_results/object_detection_benchmark_20260310_155852.json
+benchmarks/benchmark_results/object_detection_benchmark_20260312_111409.json
+benchmarks/benchmark_results/object_detection_benchmark_20260316_092630.json
+benchmarks/benchmark_results/object_detection_benchmark_20260316_093050.json
+benchmarks/benchmark_results/ocr_benchmark_20260310_143152.json
+benchmarks/benchmark_results/ocr_benchmark_20260310_145606.json
+benchmarks/benchmark_results/ocr_benchmark_20260310_154055.json
+benchmarks/benchmark_results/ocr_benchmark_20260310_154207.json
+benchmarks/benchmark_results/ocr_benchmark_20260310_154800.json
+benchmarks/benchmark_results/ocr_benchmark_20260310_155950.json
+benchmarks/benchmark_results/ocr_benchmark_20260310_160044.json
+benchmarks/benchmark_results/ocr_benchmark_20260312_111305.json
+benchmarks/benchmark_results/ocr_benchmark_20260312_123553.json
+benchmarks/benchmark_results/ocr_benchmark_20260312_123725.json
+benchmarks/benchmark_results/ocr_benchmark_20260312_155149.json
+benchmarks/benchmark_results/ocr_benchmark_20260312_155243.json
+benchmarks/benchmark_results/ocr_benchmark_20260312_160223.json
+benchmarks/benchmark_results/ocr_benchmark_20260312_162404.json
+benchmarks/benchmark_results/ocr_benchmark_20260316_083424.json
+benchmarks/benchmark_results/ocr_benchmark_20260316_085055.json
+benchmarks/benchmark_results/ocr_benchmark_20260316_092425.json
+benchmarks/benchmark_results/ocr_benchmark_20260316_092944.json
+results/2026-03-13.jsonl
+results/2026-03-16.jsonl
+__pycache__/config_loader.cpython-310.pyc
+__pycache__/objectdetection.cpython-310.pyc
+benchmarks/__pycache__/object_detection_benchmark.cpython-310.pyc
+benchmarks/__pycache__/OCR benchmark.cpython-310.pyc
+logs/vision.log
+output/__pycache__/result_writer.cpython-310.pyc
+utils/__pycache__/logger.cpython-310.pyc
+__pycache__/camera.cpython-310.pyc
+__pycache__/config.cpython-310.pyc
+__pycache__/main.cpython-310.pyc
+__pycache__/ocr.cpython-310.pyc
+__pycache__/state.cpython-310.pyc
+__pycache__/vision.cpython-310.pyc
+__pycache__/web.cpython-310.pyc
+benchmarks/benchmark_results/object_detection_benchmark_20260316_123203.json
+benchmarks/benchmark_results/object_detection_benchmark_20260316_143747.json
+benchmarks/benchmark_results/ocr_benchmark_20260316_123300.json
+benchmarks/benchmark_results/ocr_benchmark_20260316_123542.json
+benchmarks/benchmark_results/ocr_benchmark_20260316_143631.json
+benchmarks/benchmark_results/object_detection_benchmark_20260318_163546.json
+benchmarks/benchmark_results/ocr_benchmark_20260318_123232.json
+benchmarks/benchmark_results/ocr_benchmark_20260318_163439.json
+benchmarks/benchmark_results/ocr_benchmark_20260319_113504.json
+benchmarks/benchmark_results/ocr_benchmark_20260319_113551.json
+benchmarks/benchmark_results/ocr_benchmark_20260319_113637.json
+results/2026-03-17.jsonl
+results/2026-03-18.jsonl
+results/2026-03-19.jsonl
+
+# Restructured runtime data locations
+data/logs/
+data/results/
+
+# Restructured package caches
+backend/**/__pycache__/
+frontend/**/__pycache__/
+tests/**/__pycache__/
+
+benchmarks/
+data/
+
+.env
+
+/debug_ocr/00_raw_frame.png
+/debug_ocr/01_after_roi.png
+/debug_ocr/02_channel_B.png
+/debug_ocr/02_channel_G.png
+/debug_ocr/02_channel_R.png
+/debug_ocr/03_gray_best_channel.png
+/debug_ocr/03_gray_luminance.png
+/debug_ocr/04_after_upscale.png
+/debug_ocr/05_adaptive_threshold.png
+/debug_ocr/05_otsu_threshold.png
+/models/classifier/epoch-1/config.json
+/models/classifier/epoch-2/config.json
+/models/classifier/epoch-3/config.json
+/models/classifier/epoch-4/config.json
+/models/classifier/epoch-5/config.json
+/models/classifier/final/config.json
+/tests/images/IMG_5570.jpg
+/tests/results/IMG_5570.json
+/tests/results/IMG_5570_annotated.png
+/models/classifier/epoch-1/model.safetensors
+/models/classifier/epoch-2/model.safetensors
+/models/classifier/epoch-3/model.safetensors
+/models/classifier/epoch-4/model.safetensors
+/models/classifier/epoch-5/model.safetensors
+/models/classifier/final/model.safetensors
+/models/classifier/epoch-1/preprocessor_config.json
+/models/classifier/epoch-2/preprocessor_config.json
+/models/classifier/epoch-3/preprocessor_config.json
+/models/classifier/epoch-4/preprocessor_config.json
+/models/classifier/epoch-5/preprocessor_config.json
+/models/classifier/final/preprocessor_config.json
+/tests/results/test eticket OCR 3.json
+/tests/results/test eticket OCR 3_annotated.png
+/tests/results/test eticket voor OCR.json
+/tests/images/test eticket voor OCR.png
+/tests/results/test eticket voor OCR 1.json
+/tests/images/test eticket voor OCR 1.png
+/tests/results/test eticket voor OCR 1_annotated.png
+/tests/results/test eticket voor OCR 2.json
+/tests/images/test eticket voor OCR 2.png
+/tests/results/test eticket voor OCR 2_annotated.png
+/tests/results/test eticket voor OCR 3.json
+/tests/images/test eticket voor OCR 3.png
+/tests/results/test eticket voor OCR 3_annotated.png
+/tests/results/test eticket voor OCR 4.json
+/tests/images/test eticket voor OCR 4.png
+/tests/results/test eticket voor OCR 4_annotated.png
+/tests/results/test eticket voor OCR 5.json
+/tests/images/test eticket voor OCR 5.png
+/tests/results/test eticket voor OCR 5_annotated.png
+/tests/results/test eticket voor OCR_annotated.png
+/tests/models/yolov8n.pt
+/mde_automation_logo.ico
+
+# IDE
+.idea/
+
+# Python bytecode caches (any location, not just backend/frontend/tests)
+__pycache__/
+/.venv/

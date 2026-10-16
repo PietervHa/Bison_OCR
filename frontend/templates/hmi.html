@@ -1,0 +1,140 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MDE Automation — Vision HMI</title>
+    <link rel="icon" href="/static/img/mde_logo.png">
+    <link rel="stylesheet" href="/static/hmi.css">
+</head>
+
+<body>
+
+    <!-- HEADER -->
+    <div class="app-header">
+        <div class="brand">
+            <img src="/static/img/mde_logo.png" alt="MDE Automation">
+            <div class="brand-text">
+                <span class="brand-name">MDE AUTOMATION</span>
+                <span class="brand-sub">Vision Inspection</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <span class="station-id">STATION: <span id="machineIdLabel">DEFAULT</span></span>
+        </div>
+    </div>
+
+    <div class="workspace">
+
+        <!-- CAMERA -->
+        <div class="camera">
+            <img id="cameraFeed" src="/video_feed">
+            <div id="cameraDisconnectedOverlay" class="camera-disconnected-overlay" hidden>
+                <div class="camera-disconnected-text">Camera disconnected — reconnecting...</div>
+            </div>
+            <div id="below-feed" class="below-feed">
+                <div id="visionModeToggle" class="vision-toggle">
+                    <span>Vision Mode:</span>
+                    <button id="modeOcrBtn" class="mode-btn active">OCR</button>
+                    <button id="modeOcreadBtn" class="mode-btn">OCRead</button>
+                    <button id="modeObjBtn" class="mode-btn">Object Detection</button>
+                    <button id="rotateCameraBtn" class="mode-btn rotate-btn" title="Rotate 90°">90</button>
+                </div>
+                <div id="ocrKeywordSection" class="ocr-keyword-row" style="display:none;">
+                    <span>Searched word:</span>
+                    <input type="text" id="ocrKeywordInput" placeholder="bijv. www.example.com">
+                    <button id="applyOcrKeyword">Apply</button>
+                </div>
+                <div id="dynamicLabel" class="dynamic-label">-</div>
+                <div id="ocreadTextSection" class="dynamic-label" style="display:none;">
+                    Read text: <span id="ocreadText">-</span>
+                </div>
+                <div id="cycleTimeSection" class="cycle-time" style="display:none;">
+                    Processing Time: <span id="time">0 ms</span>
+                </div>
+                <div id="datasetCaptureCounter" class="dataset-capture-counter" hidden>
+                    Dataset Capture - OK: <span id="liveDatasetOkCount">0</span> | Defective: <span id="liveDatasetDefCount">0</span>
+                </div>
+            </div>
+            <div id="modeBanner" class="mode-overlay production">
+                PRODUCTION MODE
+            </div>
+        </div>
+
+        <!-- HMI PANEL -->
+        <div class="panel">
+
+            <div id="status" class="status nok">
+                NO RESULT
+            </div>
+
+            <div class="info-box">
+                <h2 id="detectionsHeading">Detections</h2>
+                <div id="detections" class="detections">None</div>
+            </div>
+
+            <div class="info-box">
+                <h2>Production Counters</h2>
+                <div class="detections">
+                    OK: <span id="okCount">0</span><br>
+                    NOK: <span id="nokCount">0</span><br>
+                    TOTAL: <span id="totalCount">0</span>
+                </div>
+            </div>
+
+            <div id="datasetCaptureBox" class="info-box">
+                <div class="dataset-capture-header">
+                    <h2>Dataset Capture</h2>
+                    <button id="captureToggleBtn" class="btn capture-toggle">Start Capture</button>
+                </div>
+                <div id="datasetCaptureInstructions" class="dataset-capture-instructions" hidden>
+                    Capture mode is active. Press <b>1</b> to save as OK, <b>2</b> to save as Defective, or <b>3</b> to stop capture.
+                </div>
+            </div>
+
+            <div id="thresholdBox" class="info-box">
+                <h2>Confidence Threshold</h2>
+                <div class="threshold-row">
+                    <input type="number" id="thresholdInput" min="0" max="1" step="0.05">
+                    <button id="applyThreshold" class="btn">Apply</button>
+                </div>
+            </div>
+
+            <div id="loginLogBox" class="info-box" style="display:none;">
+                <div class="dataset-capture-header">
+                    <h2>Recent Logins</h2>
+                    <div class="login-log-actions">
+                        <button id="refreshLoginLogBtn" class="btn login-log-refresh">Refresh</button>
+                        <button id="clearLoginLogBtn" class="btn login-log-clear">Clear</button>
+                    </div>
+                </div>
+                <div id="loginLogList" class="login-log-list">Loading...</div>
+            </div>
+
+            <div class="button-row">
+                <a href="/analytics" class="btn reset" style="display:inline-block; text-decoration:none;">Analytics</a>
+                <button id="resetBtn" class="btn reset">Reset Counters</button>
+                <button id="startProductionBtn" class="btn production">Start Production</button>
+                <button id="startMaintenanceBtn" class="btn maintenance">Maintenance</button>
+            </div>
+
+            <div class="footer">
+                Press <b>Q</b> to trigger inspection
+            </div>
+        </div>
+
+    </div>
+
+    <!-- MISSING CAMERA POPUP -->
+    <div id="missingCameraModal" class="modal-overlay" hidden>
+        <div class="modal-box destructive">
+            <h2>Missing Camera</h2>
+            <p>No camera was detected.</p>
+            <p class="modal-sub">Connect a camera — the application will continue automatically once it's found.</p>
+        </div>
+    </div>
+
+    <script src="/static/dialogs.js"></script>
+    <script src="/static/hmi.js"></script>
+</body>
+</html>

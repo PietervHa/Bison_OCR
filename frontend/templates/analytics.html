@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MDE Automation — Analytics</title>
+    <link rel="icon" href="/static/img/mde_logo.png">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/analytics.css">
+</head>
+<body>
+    <div class="brand-bar">
+        <img src="/static/img/mde_logo.png" alt="MDE Automation">
+        <div class="brand-bar-text">
+            <span class="brand-bar-name">MDE AUTOMATION</span>
+            <span class="brand-bar-sub">Vision Inspection</span>
+        </div>
+    </div>
+
+    <main class="page">
+        <header class="header">
+            <div class="header-left">
+                <a href="/">&larr; Back to HMI</a>
+            </div>
+            <div class="header-title">Inspection Analytics</div>
+            <div class="header-right">
+                <div id="todayText">Today: Loading...</div>
+                <div id="updatedText">Last updated: --:--:--</div>
+                <div class="date-nav">
+                    <button id="btn-prev-day" class="tab-btn" title="Previous day">&#8592; Prev</button>
+                    <button id="btn-next-day" class="tab-btn" title="Next day">Next &#8594;</button>
+                </div>
+            </div>
+            <div id="refreshError" class="refresh-error">Failed to refresh</div>
+        </header>
+
+        <section class="export-panel">
+            <div class="export-label">Export inspection data</div>
+            <div class="export-controls">
+                <label for="export-start">From</label>
+                <input type="date" id="export-start">
+                <label for="export-end">To</label>
+                <input type="date" id="export-end">
+                <button id="btn-export-csv" class="tab-btn">Export CSV</button>
+                <button id="btn-export-xlsx" class="tab-btn">Export Excel</button>
+            </div>
+            <div id="exportError" class="refresh-error"></div>
+        </section>
+
+        <section class="cards">
+            <article class="card">
+                <div class="card-label">Total Inspections</div>
+                <div id="totalValue" class="card-value">Loading...</div>
+            </article>
+            <article class="card">
+                <div class="card-label">OK Count</div>
+                <div id="okValue" class="card-value value-ok">Loading...</div>
+            </article>
+            <article class="card">
+                <div class="card-label">NOK Count</div>
+                <div id="nokValue" class="card-value value-nok">Loading...</div>
+            </article>
+            <article class="card">
+                <div class="card-label">OK Rate %</div>
+                <div id="okRateValue" class="card-value">Loading...</div>
+            </article>
+            <article class="card">
+                <div class="card-label">Avg Processing Time (ms)</div>
+                <div id="avgMsValue" class="card-value">Loading...</div>
+            </article>
+        </section>
+
+        <section class="chart-panel">
+            <div class="tab-row" style="margin-bottom:12px;">
+                <button id="tab-bar" class="tab-btn active" data-tab="bar">Inspections per Hour</button>
+                <button id="tab-line" class="tab-btn" data-tab="line">OK vs NOK Trend</button>
+                <button id="tab-nok-only" class="tab-btn" data-tab="nok-only">NOK Only</button>
+                <button id="tab-speed" class="tab-btn" data-tab="speed">Processing Speed</button>
+            </div>
+            <div class="chart-wrap">
+                <canvas id="hourlyChart"></canvas>
+                <canvas id="chart-nok-trend" style="display:none"></canvas>
+                <canvas id="chart-nok-only" style="display:none"></canvas>
+                <canvas id="chart-speed" style="display:none"></canvas>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/analytics.js"></script>
+</body>
+</html>
