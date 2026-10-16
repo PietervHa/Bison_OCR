@@ -3,7 +3,6 @@
 
 # Top-level settings
 machine_id: "default"
-confidence_threshold: 0.8
 
 # OCR settings
 ocr:

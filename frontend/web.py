@@ -45,10 +45,6 @@ def _build_export_table(results: list) -> tuple:
 # Pydantic models replace Flask's `request.json or {}` pattern. Defaults
 # mirror the old `data.get(key, default)` calls exactly.
 
-class ThresholdBody(BaseModel):
-    threshold: float = 0.5
-
-
 class MaintenanceModeBody(BaseModel):
     maintenance_mode: bool = False
     username: str = ""
@@ -154,17 +150,6 @@ def create_app(camera, app_state) -> FastAPI:
     @app.get("/result")
     def get_result():
         return app_state.get_snapshot()
-
-    @app.get("/threshold")
-    def get_threshold():
-        return {"threshold": app_state.get_threshold()}
-
-    @app.post("/threshold")
-    def set_threshold(body: ThresholdBody, request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
-        app_state.set_threshold(body.threshold)
-        return {"threshold": app_state.get_threshold()}
 
     @app.post("/maintenance_mode")
     def set_maintenance_mode(body: MaintenanceModeBody, request: Request, response: Response):

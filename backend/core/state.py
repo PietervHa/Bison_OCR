@@ -6,7 +6,6 @@ entire vision application, ensuring thread-safe access across camera, vision, an
 """
 
 import threading
-from backend.core.config_loader import cfg
 
 class AppState:
     """
@@ -26,12 +25,10 @@ class AppState:
             "nok": 0,
             "total": 0,
         }
-        self.confidence_threshold = 0.0
         self.maintenance_mode = False
         self.maintenance_session_token = ""
         self.maintenance_session_user = ""
         self.camera_rotation = 0  # steps: 0, 1, 2, 3 (each = 90° clockwise)
-        self.set_threshold(float(cfg["confidence_threshold"]))
 
     def update_result(self, result: dict):
         """
@@ -72,20 +69,6 @@ class AppState:
                 "counters": dict(self.counters),
                 "maintenance_mode": self.maintenance_mode,
             }
-
-    def get_threshold(self) -> float:
-        """
-        Gets the current confidence threshold.
-        """
-        with self.lock:
-            return self.confidence_threshold
-
-    def set_threshold(self, value: float):
-        """
-        Sets the confidence threshold, clamped between 0.0 and 1.0.
-        """
-        with self.lock:
-            self.confidence_threshold = max(0.0, min(1.0, float(value)))
 
     def get_maintenance_mode(self) -> bool:
         """

@@ -1,6 +1,5 @@
 let CURRENT_MODE = "production";
 let CURRENT_USER = null;
-let currentThreshold = null; // mirrors backend value
 let LAST_APPLIED_MODE = null;
 
 /* =========================
@@ -91,21 +90,6 @@ async function startResultPolling() {
 }
 
 /* =========================
-   THRESHOLD HANDLING
-========================= */
-async function loadThreshold() {
-    try {
-        const res = await fetch("/threshold");
-        const data = await res.json();
-
-        currentThreshold = data.threshold;
-        document.getElementById("thresholdInput").value = currentThreshold;
-    } catch (e) {
-        console.error("Failed to load threshold:", e);
-    }
-}
-
-/* =========================
    CAMERA CONNECTION MONITORING
 ========================= */
 let CAMERA_CONNECTED = null;       // null = not polled yet
@@ -167,36 +151,6 @@ function startCameraStatusPolling() {
     setInterval(pollCameraStatus, CAMERA_STATUS_POLL_MS);
 }
 
-
-document.getElementById("applyThreshold").addEventListener("click", async () => {
-    if (CURRENT_MODE !== "maintenance") return;
-
-    const value = parseFloat(document.getElementById("thresholdInput").value);
-
-    if (isNaN(value) || value < 0 || value > 1) {
-        showToast("Threshold must be between 0.0 and 1.0", { type: "error" });
-        return;
-    }
-
-    try {
-        const res = await fetch("/threshold", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ threshold: value })
-        });
-
-        if (!res.ok) {
-            showToast("Failed to apply threshold: not in maintenance mode (session may have expired). Reload the page and try again.", { type: "error" });
-            return;
-        }
-
-        currentThreshold = value; // freeze this value for production
-    } catch (e) {
-        console.error("Failed to set threshold:", e);
-        showToast("Failed to apply threshold: network error. Check the connection and try again.", { type: "error" });
-    }
-});
 
 /* =========================
    LOGIN LOG (maintenance mode only)
@@ -281,8 +235,6 @@ document.getElementById("clearLoginLogBtn")?.addEventListener("click", async () 
 ========================= */
 function applyMode() {
     const banner = document.getElementById("modeBanner");
-    const input = document.getElementById("thresholdInput");
-    const applyBtn = document.getElementById("applyThreshold");
     const prodBtn = document.getElementById("startProductionBtn");
     const maintBtn = document.getElementById("startMaintenanceBtn");
     const cameraControls = document.getElementById("cameraControls");
@@ -300,8 +252,6 @@ function applyMode() {
         banner.textContent = CURRENT_USER ? `MAINTENANCE MODE — ${CURRENT_USER}` : "MAINTENANCE MODE";
         banner.className = "mode-overlay maintenance";
 
-        input.disabled = false;
-        applyBtn.disabled = false;
         if (resetBtn) resetBtn.disabled = false;
         prodBtn.style.display = "inline-block";
         maintBtn.style.display = "none";
@@ -319,16 +269,12 @@ function applyMode() {
             loginLogBox.style.display = "block";
             refreshLoginLog();
         }
-
-        if (currentThreshold !== null) input.value = currentThreshold;
     }
 
     if (CURRENT_MODE === "production") {
         banner.textContent = "PRODUCTION MODE";
         banner.className = "mode-overlay production";
 
-        input.disabled = true;
-        applyBtn.disabled = true;
         if (resetBtn) resetBtn.disabled = true;
         prodBtn.style.display = "none";
         maintBtn.style.display = "inline-block";
@@ -345,8 +291,6 @@ function applyMode() {
         if (loginLogBox) {
             loginLogBox.style.display = "none";
         }
-
-        if (currentThreshold !== null) input.value = currentThreshold;
     }
 
     LAST_APPLIED_MODE = CURRENT_MODE;
@@ -358,7 +302,7 @@ function applyMode() {
 document.getElementById("startProductionBtn").addEventListener("click", async () => {
     const confirmed = await showConfirmDialog({
         title: "Start Production Mode",
-        message: "The confidence threshold will be locked until maintenance mode is entered again.",
+        message: "Maintenance functions will be locked until maintenance mode is entered again.",
         confirmLabel: "Start Production",
         destructive: false
     });
@@ -454,7 +398,6 @@ async function init() {
     try {
         // Resolve mode first so all downstream behavior is mode-aware.
         await loadStatus();
-        await loadThreshold();
         applyMode();
 
         startResultPolling();

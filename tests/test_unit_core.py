@@ -4,14 +4,8 @@ from backend.core.state import AppState
 
 
 class AppStateUnitTests(unittest.TestCase):
-    def test_threshold_is_clamped_and_counters_are_updated(self):
+    def test_counters_are_updated(self):
         state = AppState()
-
-        state.set_threshold(2.0)
-        self.assertEqual(state.get_threshold(), 1.0)
-
-        state.set_threshold(-1.0)
-        self.assertEqual(state.get_threshold(), 0.0)
 
         state.increment_counter("OK")
         state.increment_counter("NOK")
