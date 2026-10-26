@@ -9,7 +9,10 @@ and the web interface.
 import threading
 import keyboard
 import uvicorn
+from pathlib import Path
+
 from backend.core.camera import Camera
+from backend.core.image_source import ImageFolderSource
 from backend.core.vision import run_vision, bind_app_state
 from backend.core.tcp_trigger_server import TCPTriggerServer
 from frontend.web import create_app
@@ -72,6 +75,35 @@ def _process_vision_result(result, trigger_time, app_state):
     except Exception as exc:
         log.error("Failed to process vision result: %s", exc)
 
+def start_vision_cycle(camera, app_state) -> bool:
+    """Grab a frame and start one vision cycle in the background.
+    Returns False when a cycle is already running."""
+    global _vision_busy
+    if _vision_busy.is_set():
+        return False
+    frame = camera.get_frame()
+    if frame is None:
+        log.warning("No frame available; reporting NOK")
+
+    # Track trigger time for cycle time measurement
+    trigger_time = time.perf_counter()
+
+    def _callback(result):
+        try:
+            _process_vision_result(result, trigger_time, app_state)
+        finally:
+            _vision_busy.clear()
+
+    _vision_busy.set()
+    try:
+        run_vision(frame, callback=_callback)  # background thread, calls _callback
+    except Exception:
+        _vision_busy.clear()
+        raise
+    log.debug("Vision processing started (non-blocking)")
+    return True
+
+
 def vision_trigger_loop(camera, app_state):
     """
     Manual trigger loop that listens for keyboard input to start a vision cycle.
@@ -79,38 +111,27 @@ def vision_trigger_loop(camera, app_state):
     Pressing 'q' triggers the camera to capture a frame and starts vision
     processing in a background thread.
     """
-    global _vision_busy
     log.info("Press Q to trigger vision. Ctrl+C to exit.")
 
     while True:
         try:
             keyboard.wait("q")
-
-            if _vision_busy.is_set():
-                continue
-
-            frame = camera.get_frame()
-            if frame is None:
-                log.warning("No frame available; reporting NOK")
-
-            # Track trigger time for cycle time measurement
-            trigger_time = time.perf_counter()
-
-            def _callback(result):
-                global _vision_busy
-                try:
-                    _process_vision_result(result, trigger_time, app_state)
-                finally:
-                    _vision_busy.clear()
-
-            _vision_busy.set()
-
-            # Trigger vision in background thread with callback
-            run_vision(frame, callback=_callback)
-            log.debug("Vision processing started (non-blocking)")
+            start_vision_cycle(camera, app_state)
         except Exception as exc:
-            _vision_busy.clear()
             log.error("Vision trigger loop error: %s", exc)
+
+
+def make_frame_source(app_state):
+    """The camera, or still images from a folder (camera.source: "images")."""
+    cam_cfg = cfg.get("camera", {}) or {}
+    if str(cam_cfg.get("source", "live")).lower() == "images":
+        folder = Path(cam_cfg.get("images_dir") or "data/test_images")
+        if not folder.is_absolute():
+            folder = Path(__file__).resolve().parents[1] / folder
+        log.info("Frame source: test images from %s (arrow keys on the HMI)", folder)
+        return ImageFolderSource(folder, app_state=app_state)
+    return Camera(0, app_state=app_state)
+
 
 def main():
     """
@@ -123,10 +144,10 @@ def main():
     bind_app_state(app_state)
 
     try:
-        camera = Camera(0, app_state=app_state)
+        camera = make_frame_source(app_state)
 
         web_cfg = cfg["web"]
-        app = create_app(camera, app_state)
+        app = create_app(camera, app_state, start_cycle=lambda: start_vision_cycle(camera, app_state))
         web_thread = threading.Thread(
             target=lambda: uvicorn.run(
                 app,

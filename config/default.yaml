@@ -178,6 +178,14 @@ ocr:
 
 # Camera settings
 camera:
+  # Where frames come from:
+  #   live   - the camera below (production)
+  #   images - still images from images_dir, for testing without bottles.
+  #            Step through them with the left/right arrow keys on the HMI;
+  #            every step runs a read. PLC/TCP triggers and 'q' read the
+  #            current image too. Images can be added while the app runs.
+  source: "images"
+  images_dir: "data/test_images"
   device_name: "DFK 22BUC03" # <--- Change this to your camera's device name, Thanks to Peter for the tip'
   index: 0
   # NOTE: the DFK 22BUC03 is a 744x480 sensor - it cannot deliver the

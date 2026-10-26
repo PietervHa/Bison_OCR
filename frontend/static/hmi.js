@@ -177,6 +177,61 @@ document.getElementById("resetBtn").addEventListener("click", async () => {
 /* =========================
     INIT
  ========================= */
+/* =========================
+   TEST IMAGES (camera.source: "images")
+   Left/right arrow keys step through data/test_images; every step runs a read.
+========================= */
+let TEST_IMAGES_ACTIVE = false;
+let TEST_IMAGE_STEP_BUSY = false;
+
+function showTestImageInfo(st) {
+    const el = document.getElementById("testImageInfo");
+    if (!el) return;
+    if (!st || st.source !== "images") {
+        el.style.display = "none";
+        return;
+    }
+    el.style.display = "block";
+    el.textContent = st.count
+        ? `Test image ${st.index}/${st.count}: ${st.name}   (\u2190 \u2192 to step)`
+        : `No images in ${st.folder}`;
+}
+
+async function initTestImages() {
+    try {
+        const res = await fetch("/test_images", { cache: "no-store" });
+        const st = await res.json();
+        TEST_IMAGES_ACTIVE = st.source === "images";
+        showTestImageInfo(st);
+    } catch (e) {
+        console.error("Failed to load test image status:", e);
+    }
+}
+
+async function stepTestImage(direction) {
+    if (TEST_IMAGE_STEP_BUSY) return;
+    TEST_IMAGE_STEP_BUSY = true;
+    try {
+        const res = await fetch(`/test_images/${direction}`, { method: "POST" });
+        if (res.ok) {
+            showTestImageInfo(await res.json());
+            reloadCameraFeed();
+        }
+    } catch (e) {
+        console.error("Failed to step test image:", e);
+    } finally {
+        TEST_IMAGE_STEP_BUSY = false;
+    }
+}
+
+document.addEventListener("keydown", (e) => {
+    if (!TEST_IMAGES_ACTIVE) return;
+    const tag = (e.target && e.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || document.querySelector(".modal-overlay:not([hidden])")) return;
+    if (e.key === "ArrowRight") { e.preventDefault(); stepTestImage("next"); }
+    if (e.key === "ArrowLeft") { e.preventDefault(); stepTestImage("prev"); }
+});
+
 async function init() {
     try {
         // Resolve mode first so all downstream behavior is mode-aware.
@@ -184,6 +239,7 @@ async function init() {
 
         startResultPolling();
         startCameraStatusPolling();
+        initTestImages();
     } catch (e) {
         console.error("Initialization failed:", e);
     }

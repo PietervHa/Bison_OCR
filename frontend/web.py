@@ -8,7 +8,7 @@ from backend.core.config_loader import cfg
 import time
 
 
-def create_app(camera, app_state) -> FastAPI:
+def create_app(camera, app_state, start_cycle=None) -> FastAPI:
     app = FastAPI()
 
     # flask-cors' CORS(app) defaults to allowing all origins/methods/headers
@@ -109,6 +109,27 @@ def create_app(camera, app_state) -> FastAPI:
             generate_frames(),
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
+
+    # --- Test images (camera.source: "images") ------------------------------
+    # The HMI's arrow keys step through the images; each step runs a read.
+    @app.get("/test_images")
+    def test_images_status():
+        return camera.status() if hasattr(camera, "step") else {"source": "live"}
+
+    def _step_test_image(delta):
+        if not hasattr(camera, "step"):
+            return Response(status_code=409, content="Not in test-image mode (camera.source is live)")
+        status = camera.step(delta)
+        status["read_started"] = bool(start_cycle()) if start_cycle and status["count"] else False
+        return status
+
+    @app.post("/test_images/next")
+    def test_images_next():
+        return _step_test_image(+1)
+
+    @app.post("/test_images/prev")
+    def test_images_prev():
+        return _step_test_image(-1)
 
     @app.get("/camera_status")
     def camera_status(response: Response):

@@ -76,3 +76,10 @@ If the font reader can't be loaded, or doesn't support the template, the app sti
 | `response_nok` | `"NOK\n"` | Sent for every NOK, camera failure, start failure or timeout |
 | `timeout_s` | `15.0` | Wait this long for a result before answering NOK (`vision_timeout`) |
 | `max_text_length` | `64` | Longer OK reads are sent as NOK (`text_too_long`). Keep this at or below the PLC receive buffer. |
+
+## Frame source (`camera`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `camera.source` | `"live"` | `"live"` = the camera; `"images"` = still images from `images_dir`, stepped with the arrow keys on the HMI (each step runs a read) |
+| `camera.images_dir` | `"data/test_images"` | Folder with test images (png, jpg, bmp, tif), relative to the project root |
