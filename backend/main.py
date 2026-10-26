@@ -129,7 +129,8 @@ def make_frame_source(app_state):
         if not folder.is_absolute():
             folder = Path(__file__).resolve().parents[1] / folder
         log.info("Frame source: test images from %s (arrow keys on the HMI)", folder)
-        return ImageFolderSource(folder, app_state=app_state)
+        return ImageFolderSource(folder, app_state=app_state,
+                                 max_width=cam_cfg.get("images_max_width", 744))
     return Camera(0, app_state=app_state)
 
 

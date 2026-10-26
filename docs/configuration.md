@@ -83,3 +83,4 @@ If the font reader can't be loaded, or doesn't support the template, the app sti
 |---|---|---|
 | `camera.source` | `"live"` | `"live"` = the camera; `"images"` = still images from `images_dir`, stepped with the arrow keys on the HMI (each step runs a read) |
 | `camera.images_dir` | `"data/test_images"` | Folder with test images (png, jpg, bmp, tif), relative to the project root |
+| `camera.images_max_width` | `744` | Test images wider than this are scaled down to this width (aspect ratio kept, never upscaled) so characters match the production camera's size; `0` = keep the original size |

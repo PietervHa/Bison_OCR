@@ -186,6 +186,7 @@ camera:
   #            current image too. Images can be added while the app runs.
   source: "images"
   images_dir: "data/test_images"
+  images_max_width: 744   # scale larger test images down to the camera's width (0 = keep size)
   device_name: "DFK 22BUC03" # <--- Change this to your camera's device name, Thanks to Peter for the tip'
   index: 0
   # NOTE: the DFK 22BUC03 is a 744x480 sensor - it cannot deliver the

@@ -109,6 +109,8 @@ python -m pyflakes backend frontend QC_tools tests
 
 The maintenance-password tests use FastAPI's `TestClient`. They are skipped when `httpx` is not installed (`pip install httpx` to run them).
 
+With `camera.source: "images"` the app reads still images from `camera.images_dir`; images wider than `camera.images_max_width` (default 744, the camera's width) are scaled down to it so the OCRead pipeline sees camera-sized characters.
+
 ---
 
 ## Documentation

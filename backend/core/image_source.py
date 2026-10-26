@@ -9,6 +9,11 @@ vision pipeline, the TCP/PLC trigger and the HMI video feed work unchanged.
 step(+1 / -1) moves to the next / previous image (wrapping around). The
 folder is re-read on every step, so images can be added while the app runs.
 The HMI rotate button applies to the images too.
+
+Images wider than max_width (default 744, the production camera's width) are
+scaled down to that width, keeping the aspect ratio, because the OCRead
+pipeline is tuned to the camera's character size. Smaller images are never
+scaled up; max_width=0 keeps every image at its own size.
 """
 
 from __future__ import annotations
@@ -28,9 +33,10 @@ _ROTATE = {1: cv2.ROTATE_90_CLOCKWISE, 2: cv2.ROTATE_180, 3: cv2.ROTATE_90_COUNT
 
 
 class ImageFolderSource:
-    def __init__(self, folder, app_state=None):
+    def __init__(self, folder, app_state=None, max_width=744):
         self.folder = Path(folder)
         self.app_state = app_state
+        self.max_width = int(max_width or 0)
         self._lock = threading.Lock()
         self._files: list[Path] = []
         self._index = 0
@@ -60,6 +66,10 @@ class ImageFolderSource:
             self._image = cv2.imread(str(path), cv2.IMREAD_COLOR)
             if self._image is None:
                 log.warning("Test images: could not read %s", path)
+            elif self.max_width > 0 and self._image.shape[1] > self.max_width:
+                h, w = self._image.shape[:2]
+                self._image = cv2.resize(self._image, (self.max_width, round(h * self.max_width / w)),
+                                         interpolation=cv2.INTER_AREA)
 
     def step(self, delta: int) -> dict:
         """Go to the next (+1) or previous (-1) image; returns status()."""
