@@ -60,5 +60,31 @@ class ProjectPathTests(unittest.TestCase):
         absolute = str(Path.cwd().resolve())
         self.assertEqual(resolve_project_path(absolute), absolute)
 
+class TrainFontReaderLabelTests(unittest.TestCase):
+    def test_line1_candidates(self):
+        from datetime import datetime
+        from QC_tools.train_font_reader import capture_time, line1_candidates
+        t = capture_time("UId_0_Time_1-10-2026_10-28-51_123.jpg")
+        self.assertEqual(t, datetime(2026, 10, 1, 10, 28, 51))
+        self.assertEqual(line1_candidates(t), [(-1, "6274 10:27"), (0, "6274 10:28"), (1, "6274 10:29")])
+
+    def test_duplicates_are_removed(self):
+        from datetime import datetime
+        from QC_tools.train_font_reader import line1_candidates
+        # +30 s stays in the same minute -> two candidates
+        self.assertEqual(line1_candidates(datetime(2026, 10, 1, 10, 28, 10)),
+                         [(-1, "6274 10:27"), (0, "6274 10:28")])
+
+    def test_day_follows_the_shifted_time(self):
+        from datetime import datetime
+        from QC_tools.train_font_reader import line1_candidates
+        self.assertEqual(line1_candidates(datetime(2026, 10, 1, 23, 59, 45))[-1], (1, "6275 00:00"))
+        self.assertEqual(line1_candidates(datetime(2026, 10, 2, 0, 0, 20))[0], (-1, "6274 23:59"))
+
+    def test_no_capture_time_in_the_name(self):
+        from QC_tools.train_font_reader import capture_time
+        self.assertIsNone(capture_time("photo.jpg"))
+
+
 if __name__ == "__main__":
     unittest.main()

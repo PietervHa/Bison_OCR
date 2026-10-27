@@ -3,8 +3,15 @@ Train the dot-font classifier (font reader) on real camera images.
 
 Labels come from the file names (camera software format
 "UId_0_Time_<d>-<m>-<yyyy>_<h>-<min>-<s>_<ms>.jpg"):
-  line 1 = year digit + day of year + capture time rounded to the minute,
-           e.g. 1 Oct 2026 10:28:51 -> "6274 10:29"
+  line 1 = year digit + day of year + time to the minute, e.g. "6274 10:29".
+           The printer's and camera's clocks are not in sync, so the printed
+           minute can differ by one from the capture time: the candidates are
+           capture time -60 s, +0 s and +30 s (rounded down to the minute,
+           duplicates removed), e.g. 1 Oct 2026 10:28:51 -> "6274 10:27",
+           "6274 10:28", "6274 10:29". The candidate the current model fits
+           best is used (chosen together with orientation and format), for
+           training and as the truth in the test; the report counts how
+           often each was chosen.
   line 2 = the format's second line with the date filled in (--date, default
            05/28), e.g. "BB 05/28" or "EXP 05/28"; empty for a single-line
            format. The formats come from the config
@@ -102,14 +109,36 @@ def synth_cells(n_codes, rng):
     return X, Y
 
 
-def label_line1(path):
+LINE1_OFFSETS_S = (-60, 0, 30)
+
+
+def capture_time(path):
+    """Capture time from the camera software's file name, or None."""
     m = NAME.search(Path(path).name)
     if not m:
-        return None, None
+        return None
     d, mo, y, h, mi, s = map(int, m.groups())
-    t = datetime.datetime(y, mo, d, h, mi, s) + datetime.timedelta(seconds=30)
-    doy = datetime.date(y, mo, d).timetuple().tm_yday
-    return f"{str(y)[-1]}{doy:03d} {t:%H:%M}", (y, mo, d, h, mi, s)
+    return datetime.datetime(y, mo, d, h, mi, s)
+
+
+def line1_text(t):
+    """Line 1 as printed at time t: year digit, day of year, HH:MM (seconds dropped)."""
+    return f"{str(t.year)[-1]}{t.timetuple().tm_yday:03d} {t:%H:%M}"
+
+
+def line1_candidates(t):
+    """[(minutes vs. the capture minute, line 1 text)] for capture time t:
+    t -60 s, t and t +30 s rounded down to the minute, duplicates removed.
+    The day (and year digit) follow the shifted time, so 23:59:50 +30 s is
+    the next day."""
+    base = t.replace(second=0, microsecond=0)
+    out = []
+    for off in LINE1_OFFSETS_S:
+        shifted = (t + datetime.timedelta(seconds=off)).replace(second=0, microsecond=0)
+        cand = (int((shifted - base).total_seconds() // 60), line1_text(shifted))
+        if cand not in out:
+            out.append(cand)
+    return out
 
 
 def label_lines(template, line1, date):
@@ -140,28 +169,33 @@ def crop_of(engine, img, max_width):
     return engine._prepare(img)[0]
 
 
-def best_layout(reader, crop, line1, date, formats, min_fit):
-    """Orientation + format that the current model fits best; returns (template, labels, cells, score).
+def best_layout(reader, crop, line1_cands, date, formats, min_fit):
+    """Orientation + format + line 1 candidate that the current model fits best;
+    returns (template, labels, cells, score, line1, minute_delta) or None.
+    line1_cands: [(minute_delta, text)] from line1_candidates().
     A format with more lines wins when its fit reaches min_fit (a two-line print
     also fits the single-line format on line 1; the font reader refuses that,
     and so does this)."""
     boosted, raw = ink_maps(crop)
     best, best_key = None, None
     for tpl in formats:
-        labels = flat(tpl, label_lines(tpl, line1, date))
         for flip in (False, True):
             seg = segment(raw[::-1, ::-1].copy() if flip else raw, tpl)
             if seg["second_line"]:
                 continue
             cells = cells_from(boosted, seg, flip)
-            if len(cells) != len(labels):
-                continue
-            p = reader._predict(cells)
-            known = [(i, reader.idx[literal_class(c)]) for i, c in enumerate(labels) if literal_class(c) in reader.idx]
-            score = float(np.mean([np.log(p[i, j] + 1e-9) for i, j in known]))
-            key = (score >= min_fit, len(tpl), score)
-            if best is None or key > best_key:
-                best, best_key = (tpl, labels, cells, score), key
+            p = None
+            for delta, line1 in line1_cands:
+                labels = flat(tpl, label_lines(tpl, line1, date))
+                if len(cells) != len(labels):
+                    continue
+                if p is None:
+                    p = reader._predict(cells)
+                known = [(i, reader.idx[literal_class(c)]) for i, c in enumerate(labels) if literal_class(c) in reader.idx]
+                score = float(np.mean([np.log(p[i, j] + 1e-9) for i, j in known]))
+                key = (score >= min_fit, len(tpl), score)
+                if best is None or key > best_key:
+                    best, best_key = (tpl, labels, cells, score, line1, delta), key
     return best
 
 
@@ -222,27 +256,28 @@ def main(argv=None):
     formats = [v.lines for v in engine.validators]          # ocr.read_validation.templates
 
     files = sorted((p for p in args.images.rglob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")),
-                   key=lambda p: label_line1(p)[1] or (0,))
+                   key=lambda p: capture_time(p) or datetime.datetime.min)
     per_day = defaultdict(list)
     for p in files:
-        l1, ts = label_line1(p)
-        if l1:
-            per_day[ts[:3]].append((p, l1))
+        t = capture_time(p)
+        if t:
+            per_day[t.date()].append((p, t))
     split = {}
     for day, items in per_day.items():
-        for i, (p, l1) in enumerate(items):
+        for i, (p, t) in enumerate(items):
             split[p] = "train" if i % 2 == 0 else "test"
 
-    t0 = time.time(); samples = []; skipped = Counter(); no_fit = []
-    for p, l1 in ((p, l1) for items in per_day.values() for p, l1 in items):
+    t0 = time.time(); samples = []; skipped = Counter(); no_fit = []; line1_chosen = Counter()
+    for p, t in ((p, t) for items in per_day.values() for p, t in items):
         img = cv2.imread(str(p))
         if img is None:
             skipped["unreadable file"] += 1; continue
         crop = crop_of(engine, img, args.max_width)
-        fit = best_layout(old, crop, l1, args.date, formats, args.min_fit)
+        fit = best_layout(old, crop, line1_candidates(t), args.date, formats, args.min_fit)
         if fit is None or fit[3] < args.min_fit:
             skipped["print does not fit"] += 1; no_fit.append(p.name); continue
-        tpl, labels, cells, score = fit
+        tpl, labels, cells, score, l1, delta = fit
+        line1_chosen[f"{delta:+d} min" if delta else "same minute"] += 1
         samples.append({"path": p, "split": split[p], "template": tpl, "labels": labels, "cells": cells,
                         "text": " ".join(label_lines(tpl, l1, args.date)),   # e.g. "6274 09:23 BB 05/28"
                         "crop": crop, "fit": score})
@@ -295,6 +330,9 @@ def main(argv=None):
               # Images that fit none of the configured formats (a new print
               # format shows up here instead of disappearing in "skipped").
               "no_fit_images": no_fit,
+              # Which line 1 candidate was chosen, relative to the capture
+              # minute (printer and camera clocks are not in sync).
+              "line1_chosen": dict(line1_chosen),
               "train_images": sum(s["split"] == "train" for s in samples),
               "test_images": sum(s["split"] == "test" for s in samples),
               "train_cells": len(Y), "classes": classes,
