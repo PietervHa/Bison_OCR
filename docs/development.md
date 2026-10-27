@@ -57,7 +57,7 @@ This writes files on every read, so leave it off in production.
 
 ## Changing the print format
 
-The font reader reads two lines of digits plus the literals `B`, `:` and `/` from the current template. For a new format, change `ocr.read_validation.template` and `value_pattern`. If the font reader does not support the new template, the app logs an error at startup and every read is NOK with `ocr_engine_error`. The font reader then has to be retrained, which is not part of this repository.
+The font reader reads formats of one or two lines made of digits plus the literals the model knows (`B`, `:` and `/` with the current model). The formats are listed in `ocr.read_validation.templates`; for a new format add it there and make sure `value_pattern` accepts it. A format the model does not support is skipped with a warning at startup; if it supports none of them, every read is NOK with `ocr_engine_error`. To support new characters (e.g. `EXP`), retrain with `python -m QC_tools.train_font_reader <images_dir>`, which takes its formats from the same `templates` setting.
 
 ## Rules worth keeping
 

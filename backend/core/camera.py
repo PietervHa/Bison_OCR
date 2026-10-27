@@ -87,6 +87,7 @@ unable to recover at all.
 """
 
 import cv2
+import importlib
 import logging
 import numpy as np
 import threading
@@ -220,7 +221,7 @@ def _resolve_camera_index(cam_cfg):
         # Imported here, on the calling thread, exactly as before - the
         # first import (from the main thread at startup) is what lets
         # comtypes initialise COM on the main thread.
-        import pygrabber.dshow_graph  # noqa: F401
+        importlib.import_module("pygrabber.dshow_graph")
     except ImportError as exc:
         if not _device_name_lookup_warned:
             log.error(

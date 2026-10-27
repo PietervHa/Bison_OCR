@@ -115,6 +115,17 @@ class CodeTemplate:
             max_ignored_tokens=cfg.get("max_ignored_tokens", 2),
         )
 
+    @classmethod
+    def list_from_config(cls, cfg: dict):
+        """One CodeTemplate per configured print format: `templates` (a list
+        of formats, each a list of lines), or the older single `template` when
+        `templates` is absent. value_pattern and the matching settings are
+        shared by all formats."""
+        templates = cfg.get("templates")
+        if not templates:
+            templates = [cfg.get("template") or []]
+        return [cls.from_config(dict(cfg, template=t)) for t in templates]
+
     # -- character level ---------------------------------------------------
 
     @staticmethod

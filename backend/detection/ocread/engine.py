@@ -4,8 +4,17 @@ OCRead engine
 Reads the dot-printed code on a bottle cap:
 
     locate the print (text_locator.py) -> deskewed crop -> font reader
-    (font_reader.py, which cleans the crop with dot_text.py) -> format
-    check (code_validator.py: template + value_pattern) -> result
+    (font_reader.py, which cleans the crop with dot_text.py), once per
+    configured print format -> pick one format -> format check
+    (code_validator.py: template + value_pattern) -> result
+
+Several print formats can be configured (ocr.read_validation.templates),
+e.g. "#### ##:##" / "BB ##/##", "#### ##:##" / "EXP ##/##" and the single
+line "#### ##:##". Every format the model supports is read on the same
+crop. Of the trusted reads (the font reader's own gates pass), the format
+with more lines wins, then the higher literal score: a two-line print is
+never accepted as the single-line format with line 2 ignored. The chosen
+format is in validation["format"].
 
 The result is a dict with the keys downstream code relies on: detections,
 text, processing_time_ms, mode="ocread", validation and - for a rejected
@@ -69,10 +78,11 @@ class OCRead:
             log.info("OCRead debug captures are written to %s", self.dynamic_roi_debug_dir)
 
         # Read validation (code_validator.py): a read is only reported OK if
-        # it fits the configured print template; otherwise NOK with a reason
-        # instead of forwarding a guess to the PLC.
+        # it fits one of the configured print formats; otherwise NOK with a
+        # reason instead of forwarding a guess to the PLC.
         val_cfg = ocr_cfg.get("read_validation") if isinstance(ocr_cfg.get("read_validation"), dict) else {}
-        self.validator = CodeTemplate.from_config(val_cfg)
+        self.validators = CodeTemplate.list_from_config(val_cfg)
+        self.skipped_formats = []
         self._last_located = None
 
         # Font reader: classifier trained on this printer's dot font
@@ -89,8 +99,13 @@ class OCRead:
                 min_literal_score=float(fr_cfg.get("min_literal_score", -1.0)),
                 min_digit_confidence=float(fr_cfg.get("min_digit_confidence", 0.0)),
             )
-            if not font_reader.supports(self.validator.lines) or len(self.validator.lines) != 2:
-                self.unavailable_reason = f"font reader does not support template {self.validator.lines}"
+            # A format with characters the model doesn't know (e.g. EXP with
+            # a model trained without E, X, P) is skipped, not an error.
+            self.skipped_formats = [v.lines for v in self.validators
+                                    if not font_reader.supports(v.lines) or len(v.lines) not in (1, 2)]
+            if len(self.skipped_formats) == len(self.validators):
+                self.unavailable_reason = ("font reader does not support any template "
+                                           f"{[v.lines for v in self.validators]}")
             else:
                 self.font_reader = font_reader
         except Exception as exc:
@@ -100,7 +115,53 @@ class OCRead:
             log.error("OCRead unavailable (%s) - every read will be NOK (ocr_engine_error).",
                       self.unavailable_reason)
         else:
-            log.info("OCRead: font reader, template=%s", self.validator.lines)
+            log.info("OCRead: font reader, formats=%s", [f.lines for f in self._read_formats()])
+            for lines in self.skipped_formats:
+                log.warning("OCRead: format %s skipped - the font reader model does not support it", lines)
+
+    @property
+    def validator(self):
+        """The first configured format. Assigning one replaces all formats."""
+        return self.validators[0]
+
+    @validator.setter
+    def validator(self, value):
+        self.validators = [value]
+
+    def _read_formats(self):
+        return [v for v in self.validators if v.lines not in self.skipped_formats]
+
+    def _read_all_formats(self, crop):
+        """Read the crop once per supported format and pick one.
+
+        Returns (validator, read, attempts): the trusted read of the format
+        with the most lines (then the highest literal score); with no trusted
+        read, the read with the highest literal score (for its reject reason);
+        (None, None, attempts) when nothing could be read at all."""
+        reads, attempts = [], []
+        # More lines first: once a format is trusted, formats with fewer lines
+        # can no longer win and are not read (saves a read per cycle).
+        for v in sorted(self._read_formats(), key=lambda v: -len(v.lines)):
+            if any(t and len(x.lines) > len(v.lines) for x, _, t in reads):
+                break
+            r = self.font_reader.read(crop, v.lines)
+            if r is not None and len(r["lines"]) != len(v.lines):
+                r = None
+            trusted = (r is not None and r["literal_score"] >= self.font_reader.min_literal_score
+                       and r["confidence"] >= self.font_reader.min_digit_confidence)
+            attempts.append({"format": v.lines, "trusted": trusted,
+                             "literal_score": r["literal_score"] if r else None,
+                             "min_token_confidence": r["confidence"] if r else None})
+            if r is not None:
+                reads.append((v, r, trusted))
+        if not reads:
+            return None, None, attempts
+        trusted = [x for x in reads if x[2]]
+        if trusted:
+            v, r, _ = max(trusted, key=lambda x: (len(x[0].lines), x[1]["literal_score"]))
+        else:
+            v, r, _ = max(reads, key=lambda x: x[1]["literal_score"])
+        return v, r, attempts
 
     def _downscale_roi(self, frame):
         if self.downscale >= 1.0:
@@ -195,7 +256,8 @@ class OCRead:
 
         OK only when the font reader's own gates (literal_score, digit
         confidence) and the template check (format + value_pattern) all
-        pass; "text" is then the canonical code, e.g. "4113 08:26 BB 05/26".
+        pass for the chosen format; "text" is then the canonical code, e.g.
+        "4113 08:26 BB 05/26" or "6286 16:24".
         Otherwise failure_reason is format_mismatch / low_confidence /
         invalid_value / no_text_detected and "text" is empty.
         """
@@ -210,7 +272,7 @@ class OCRead:
 
         t0 = time.perf_counter()
         crop, cycle_debug_dir, profile_data, located = self._prepare(frame)
-        r = self.font_reader.read(crop, self.validator.lines)
+        validator, r, attempts = self._read_all_formats(crop)
         elapsed = (time.perf_counter() - t0) * 1000.0
         if r is None:
             reason, candidates, verdict = REJECT_FORMAT, [], None
@@ -218,7 +280,7 @@ class OCRead:
             candidates = [{"text": line, "confidence": r["confidence"]} for line in r["lines"]]
             # The font reader has its own gates (literal_score, digit confidence);
             # the template check here adds the value_pattern sanity check.
-            verdict = self.validator.validate([{"text": line, "confidence": 1.0} for line in r["lines"]])
+            verdict = validator.validate([{"text": line, "confidence": 1.0} for line in r["lines"]])
             if r["literal_score"] < self.font_reader.min_literal_score:
                 reason = REJECT_FORMAT
             elif r["confidence"] < self.font_reader.min_digit_confidence:
@@ -240,7 +302,8 @@ class OCRead:
                         "min_token_confidence": r["confidence"] if r else None,
                         "literal_score": r["literal_score"] if r else None,
                         "timings_ms": r.get("timings_ms") if r else None,
-                        "orientation": ("reversed" if r and r["flipped"] else "normal") if r else None}
+                        "orientation": ("reversed" if r and r["flipped"] else "normal") if r else None,
+                        "format": validator.lines if validator else None, "formats_tried": attempts}
         if cycle_debug_dir:
             try:
                 os.makedirs(cycle_debug_dir, exist_ok=True)
@@ -255,7 +318,8 @@ class OCRead:
             "text": text,
             "processing_time_ms": round(elapsed, 1),
             "mode": MODE,
-            "validation": {"accepted": accepted, "reason": reason, "reads": [read_summary], "fusion": None},
+            "validation": {"accepted": accepted, "reason": reason, "reads": [read_summary], "fusion": None,
+                           "format": validator.lines if validator else None},
         }
         if not accepted:
             result["failure_reason"] = reason

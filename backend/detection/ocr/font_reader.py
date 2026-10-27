@@ -20,7 +20,9 @@ and 20/20 of the crossing-ribs "3030 22:42" frames.
 Pipeline, per deskewed crop from the text locator:
   1. ink map via dot_text (flat-field, ribs removed by shape)
   2. residual skew: angle with the sharpest row profile (+/-30 deg)
-  3. two equal-height text bands fitted to the row profile
+  3. one text band per template line (one or two, equal height) fitted to
+     the row profile; for a one-line template, a crop that clearly holds
+     two lines is not read (a two-line print must never pass as one line)
   4. per band, a fixed-pitch character grid fitted to the column profile,
      using the template layout (spaces between fields may or may not be
      printed, e.g. "BB 05/26" vs "BB08/27")
@@ -32,14 +34,14 @@ Pipeline, per deskewed crop from the text locator:
      garbled cut or wrong orientation fails this) and every digit is
      confident enough.
 
-Supports templates made of '#' digit positions and the literals B : / and
-spaces (e.g. ["#### ##:##", "BB ##/##"]). Other templates -> not supported
-(read() returns None) and OCRead falls back to its configured behaviour.
+Supports templates of one or two lines made of '#' digit positions,
+spaces and literals the model knows (B : / with the current model; e.g.
+["#### ##:##", "BB ##/##"] or ["#### ##:##"]). Other templates -> not
+supported (read() returns None); OCRead skips such a format.
 """
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 
@@ -50,6 +52,11 @@ from backend.detection.ocr.dot_text import clean_dot_text
 
 DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "font_reader.npz"
 CELL_W, CELL_H = 16, 24
+# One-line template: the crop holds a second line when the best two-band fit
+# scores more than this times the best one-band fit. On one line the two-band
+# fit only splits that line (ratio 1.00 on the fixture crops); on two-line
+# prints it was 1.21-1.57.
+SECOND_LINE_RATIO = 1.1
 
 
 # -- geometry (identical to the evaluated prototype) --------------------------
@@ -73,10 +80,18 @@ def _deskew(ink, max_deg=30.0, first_deg=8.0):
     return float(max(np.arange(coarse - 2.0, coarse + 2.01, 0.5), key=sharp))
 
 
-def _fit_lines(fit):
+def _fit_lines(fit, n_lines=2):
+    """Best n_lines (1 or 2) equal-height text bands: (score, [(y0, y1), ...])."""
     r = fit.sum(axis=1); H = len(r); t = 0.25 * r.max(); c = np.r_[0.0, np.cumsum(r - t)]
     best = (-1e18, None)
     for h in range(8, min(45, H // 2) + 1):
+        if n_lines == 1:
+            ys = np.arange(0, H - h + 1)
+            s = c[ys + h] - c[ys]
+            i = int(np.argmax(s))
+            if s[i] > best[0]:
+                best = (float(s[i]), [(int(ys[i]), int(ys[i] + h))])
+            continue
         for g in range(0, h + 1):
             ys = np.arange(0, H - 2 * h - g + 1)
             if len(ys) == 0:
@@ -144,9 +159,12 @@ def ink_maps(crop):
 def segment(fit_ink, template, first_deg=8.0):
     ang = _deskew(fit_ink, first_deg=first_deg)
     f = _rotate(fit_ink, ang)
-    _, bands = _fit_lines(f)
+    score, bands = _fit_lines(f, len(template))
     lines = [_fit_cells(f, band, tl)[1] for band, tl in zip(bands, template)]
-    return {"angle": ang, "bands": bands, "lines": lines}
+    seg = {"angle": ang, "bands": bands, "lines": lines, "second_line": False}
+    if len(template) == 1:
+        seg["second_line"] = _fit_lines(f, 2)[0] > SECOND_LINE_RATIO * score
+    return seg
 
 
 def cells_from(boosted, seg, flip):
@@ -208,8 +226,11 @@ class FontReader:
         return lines, (float(np.mean(lit)) if lit else 0.0), conf
 
     def read(self, crop, template):
-        """Returns dict(lines, text, literal_score, confidence, flipped, angle, trusted) or None."""
-        if crop is None or crop.size == 0 or not self.supports(template) or len(template) != 2:
+        """Returns dict(lines, text, literal_score, confidence, flipped, angle, trusted) or None.
+
+        None also when a one-line template is read on a crop that holds two
+        lines: that would be line 1 with line 2 ignored, not a reading."""
+        if crop is None or crop.size == 0 or not self.supports(template) or len(template) not in (1, 2):
             return None
         t0 = time.perf_counter()
         timings = {}
@@ -228,6 +249,8 @@ class FontReader:
             # the narrow range can otherwise win on a skewed crop).
             for first_deg in (8.0, 30.0):
                 seg = segment(fit, template, first_deg=first_deg)
+                if seg["second_line"]:
+                    return None                         # two lines; orientation doesn't change that
                 cells = cells_from(boosted, seg, flip)
                 if len(cells) != n_pos:
                     continue

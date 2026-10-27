@@ -4,10 +4,11 @@ mode (and its password) has been removed.
 
 Run with:  python -m unittest tests.test_web_controls
 """
+import importlib
 import unittest
 
 try:
-    import httpx  # noqa: F401  (FastAPI's TestClient needs it)
+    importlib.import_module("httpx")  # FastAPI's TestClient needs it
     from fastapi.testclient import TestClient
     from frontend.web import create_app
     HAVE_CLIENT = True

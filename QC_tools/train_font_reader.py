@@ -5,8 +5,11 @@ Labels come from the file names (camera software format
 "UId_0_Time_<d>-<m>-<yyyy>_<h>-<min>-<s>_<ms>.jpg"):
   line 1 = year digit + day of year + capture time rounded to the minute,
            e.g. 1 Oct 2026 10:28:51 -> "6274 10:29"
-  line 2 = "<BB|EXP> <date>"; BB or EXP is decided per image by which layout
-           the current model fits best (--date, default 05/28).
+  line 2 = the format's second line with the date filled in (--date, default
+           05/28), e.g. "BB 05/28" or "EXP 05/28"; empty for a single-line
+           format. The formats come from the config
+           (ocr.read_validation.templates); per image the format the current
+           model fits best is used, a format with more lines first.
 Images where the cutter fails clearly are left out; contact_sheet.png next to
 the model shows training cells with their labels for a visual check.
 Synthetic codes in the 5x7 dot font (incl. E, X, P) are added (--synth).
@@ -31,8 +34,6 @@ import numpy as np
 from backend.detection.ocr.font_reader import FontReader, cells_from, ink_maps, segment, DEFAULT_MODEL
 
 NAME = re.compile(r"Time_(\d+)-(\d+)-(\d+)_(\d+)-(\d+)-(\d+)_")
-LINE1 = "#### ##:##"
-LAYOUTS = {"BB": "BB ##/##", "EXP": "EXP ##/##"}
 NEW_CLASSES = ["E", "X", "P"]
 CELL_W, CELL_H = 16, 24
 
@@ -103,6 +104,24 @@ def label_line1(path):
     return f"{str(y)[-1]}{doy:03d} {t:%H:%M}", (y, mo, d, h, mi, s)
 
 
+def label_lines(template, line1, date):
+    """Text per template line: line 1 from the file name, the '#' positions of
+    any further line filled with the digits of --date ("BB ##/##" -> "BB 05/28")."""
+    out = [line1]
+    for tl in template[1:]:
+        digits = iter(c for c in date if c.isdigit())
+        try:
+            out.append("".join(next(digits) if ch == "#" else ch for ch in tl))
+        except StopIteration:
+            raise ValueError(f"--date {date!r} has too few digits for {tl!r}") from None
+    return out
+
+
+def format_name(template):
+    """Short name for reports: "BB", "EXP", ... (first field of line 2) or "single_line"."""
+    return template[1].split()[0] if len(template) > 1 else "single_line"
+
+
 def flat(template_lines, text_lines):
     return [c for tl, xl in zip(template_lines, text_lines) for t, c in zip(tl, xl) if t != " "]
 
@@ -113,23 +132,28 @@ def crop_of(engine, img, max_width):
     return engine._prepare(img)[0]
 
 
-def best_layout(reader, crop, line1, date):
-    """Orientation + BB/EXP layout that the current model fits best; returns (template, labels, cells, score)."""
+def best_layout(reader, crop, line1, date, formats, min_fit):
+    """Orientation + format that the current model fits best; returns (template, labels, cells, score).
+    A format with more lines wins when its fit reaches min_fit (a two-line print
+    also fits the single-line format on line 1; the font reader refuses that,
+    and so does this)."""
     boosted, raw = ink_maps(crop)
-    best = None
-    for prefix, l2 in LAYOUTS.items():
-        tpl = [LINE1, l2]
-        labels = flat(tpl, [line1, f"{prefix} {date}"])
+    best, best_key = None, None
+    for tpl in formats:
+        labels = flat(tpl, label_lines(tpl, line1, date))
         for flip in (False, True):
             seg = segment(raw[::-1, ::-1].copy() if flip else raw, tpl)
+            if seg["second_line"]:
+                continue
             cells = cells_from(boosted, seg, flip)
             if len(cells) != len(labels):
                 continue
             p = reader._predict(cells)
             known = [(i, reader.idx[c]) for i, c in enumerate(labels) if c in reader.idx]
             score = float(np.mean([np.log(p[i, j] + 1e-9) for i, j in known]))
-            if best is None or score > best[3]:
-                best = (tpl, labels, cells, score)
+            key = (score >= min_fit, len(tpl), score)
+            if best is None or key > best_key:
+                best, best_key = (tpl, labels, cells, score), key
     return best
 
 
@@ -187,6 +211,7 @@ def main(argv=None):
         if hasattr(engine, a):
             setattr(engine, a, None)
     old = FontReader(DEFAULT_MODEL, min_literal_score=-1.0)
+    formats = [v.lines for v in engine.validators]          # ocr.read_validation.templates
 
     files = sorted((p for p in args.images.rglob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")),
                    key=lambda p: label_line1(p)[1] or (0,))
@@ -206,12 +231,12 @@ def main(argv=None):
         if img is None:
             skipped["unreadable file"] += 1; continue
         crop = crop_of(engine, img, args.max_width)
-        fit = best_layout(old, crop, l1, args.date)
+        fit = best_layout(old, crop, l1, args.date, formats, args.min_fit)
         if fit is None or fit[3] < args.min_fit:
             skipped["print does not fit"] += 1; continue
         tpl, labels, cells, score = fit
         samples.append({"path": p, "split": split[p], "template": tpl, "labels": labels, "cells": cells,
-                        "text": f"{l1} {tpl[1].split()[0]} {args.date}",   # e.g. "6274 09:23 BB 05/28"
+                        "text": " ".join(label_lines(tpl, l1, args.date)),   # e.g. "6274 09:23 BB 05/28"
                         "crop": crop, "fit": score})
     classes = list(old.classes) + [c for c in NEW_CLASSES if c not in old.classes]
     idx = {c: i for i, c in enumerate(classes)}
@@ -234,9 +259,9 @@ def main(argv=None):
     new = FontReader(args.out, min_literal_score=-1.0)
     res = defaultdict(Counter); wrong = []
     for s in (s for s in samples if s["split"] == "test"):
-        kind = "EXP" if s["template"][1].startswith("EXP") else "BB"
+        kind = format_name(s["template"])
         for name, rd in (("new", new), ("old", old)):
-            if name == "old" and kind == "EXP":
+            if name == "old" and not old.supports(s["template"]):
                 continue
             r = rd.read(s["crop"], s["template"])
             truth = " ".join(" ".join(x.split()) for x in [s["text"]])
@@ -261,7 +286,7 @@ def main(argv=None):
               "train_images": sum(s["split"] == "train" for s in samples),
               "test_images": sum(s["split"] == "test" for s in samples),
               "train_cells": len(Y), "classes": classes,
-              "line2": dict(Counter("EXP" if s["template"][1].startswith("EXP") else "BB" for s in samples)),
+              "formats": dict(Counter(format_name(s["template"]) for s in samples)),
               "test_results": {k: dict(v) for k, v in res.items()}, "wrong_examples": wrong,
               "seconds": round(time.time() - t0)}
     print(json.dumps(report, indent=1))

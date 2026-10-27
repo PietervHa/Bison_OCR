@@ -65,12 +65,14 @@ def _process_vision_result(result, trigger_time, app_state):
                 detection_count,
             )
         else:
+            validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
             log.info(
-                "VISION RESULT: status=%s cycle_time_ms=%s confidence=%s detections=%s",
+                "VISION RESULT: status=%s cycle_time_ms=%s confidence=%s detections=%s format=%s",
                 status,
                 cycle_time_ms,
                 confidence,
                 detection_count,
+                validation.get("format"),
             )
     except Exception as exc:
         log.error("Failed to process vision result: %s", exc)
@@ -78,7 +80,6 @@ def _process_vision_result(result, trigger_time, app_state):
 def start_vision_cycle(camera, app_state) -> bool:
     """Grab a frame and start one vision cycle in the background.
     Returns False when a cycle is already running."""
-    global _vision_busy
     if _vision_busy.is_set():
         return False
     frame = camera.get_frame()
