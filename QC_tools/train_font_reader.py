@@ -175,12 +175,14 @@ def best_layout(reader, crop, line1_cands, date, formats, min_fit):
     line1_cands: [(minute_delta, text)] from line1_candidates().
     A format with more lines wins when its fit reaches min_fit (a two-line print
     also fits the single-line format on line 1; the font reader refuses that,
-    and so does this)."""
+    and so does this). Like FontReader.read, the grid is fitted with the
+    narrow (+/-8 deg) and the full (+/-30 deg) angle search; some crops only
+    segment correctly with the full search."""
     boosted, raw = ink_maps(crop)
     best, best_key = None, None
     for tpl in formats:
-        for flip in (False, True):
-            seg = segment(raw[::-1, ::-1].copy() if flip else raw, tpl)
+        for flip, first_deg in ((f, d) for f in (False, True) for d in (8.0, 30.0)):
+            seg = segment(raw[::-1, ::-1].copy() if flip else raw, tpl, first_deg=first_deg)
             if seg["second_line"]:
                 continue
             cells = cells_from(boosted, seg, flip)
