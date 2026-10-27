@@ -180,7 +180,9 @@ class OCReadUnavailableTests(unittest.TestCase):
 
 TPL_EXP = ["#### ##:##", "EXP ##/##"]
 TPL_ONE = ["#### ##:##"]
+TPL_PROD = ["#### ##:##", "PROD ##/##"]
 ALL_FORMATS = [TPL, TPL_EXP, TPL_ONE]
+DEFAULT_FORMATS = [TPL, TPL_EXP, TPL_PROD, TPL_ONE]
 VALUE_PATTERN = r"^\d{4} ([01]\d|2[0-3]):[0-5]\d( (BB|EXP) (0[1-9]|1[0-2])/\d{2})?$"
 
 
@@ -372,22 +374,93 @@ class TemplatesConfigTests(unittest.TestCase):
         vs = CodeTemplate.list_from_config({"template": TPL, "templates": [TPL_ONE]})
         self.assertEqual([v.lines for v in vs], [TPL_ONE])
 
-    def test_default_config_has_the_three_formats(self):
+    def test_default_config_has_the_four_formats(self):
         from backend.detection.ocread.engine import OCRead
         e = OCRead()
-        self.assertEqual([v.lines for v in e.validators], ALL_FORMATS)
+        self.assertEqual([v.lines for v in e.validators], DEFAULT_FORMATS)
         self.assertIsNotNone(e.font_reader, e.unavailable_reason)
-        expected_skipped = [] if FontReader().supports(TPL_EXP) else [TPL_EXP]
-        self.assertEqual(e.skipped_formats, expected_skipped)
+        reader = FontReader()
+        self.assertEqual(e.skipped_formats, [f for f in (TPL_EXP, TPL_PROD) if not reader.supports(f)])
 
     def test_value_pattern_accepts_all_formats(self):
         import re
         from backend.core.config_loader import cfg
         pat = re.compile(cfg["ocr"]["read_validation"]["value_pattern"])
-        for ok in ("6274 10:29 BB 05/28", "6274 05:58 EXP 05/28", "6286 16:24"):
+        for ok in ("6274 10:29 BB 05/28", "6274 05:58 EXP 05/28", "6288 22:00 PROD 10/26", "6286 16:24"):
             self.assertTrue(pat.fullmatch(ok), ok)
-        for bad in ("6286 24:00", "6274 10:29 BB 13/28", "6274 10:29 XX 05/28", "6274 10:29 BB"):
+        for bad in ("6286 24:00", "6274 10:29 BB 13/28", "6274 10:29 XX 05/28", "6274 10:29 BB",
+                    "6288 22:00 PROD 13/26", "6288 24:00 PROD 10/26", "6288 22:00 PR0D 10/26"):
             self.assertFalse(pat.fullmatch(bad), bad)
+
+
+class LetterOIsDigitZeroTests(unittest.TestCase):
+    """In this dot font O and 0 are the same glyph: a literal O is scored with
+    the 0 class. Digit positions are never mapped."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls.reader = FontReader(min_literal_score=-1.0)
+        # The current model may lack P, R and D: add them (never predicted) so
+        # the PROD format is supported, as it will be after retraining.
+        d = np.load(str(Path(__file__).resolve().parents[1] / "backend/detection/ocr/models/font_reader.npz"))
+        n = d["W1"].shape[1]
+        extra = [c for c in "PRD" if c not in list(d["classes"])]
+        cls.tmp = tempfile.TemporaryDirectory()
+        model = Path(cls.tmp.name) / "font_reader_prd.npz"
+        np.savez(model, W1=d["W1"], b1=d["b1"],
+                 W2=np.hstack([d["W2"], np.zeros((n, len(extra)), np.float32)]),
+                 b2=np.r_[d["b2"], np.full(len(extra), -50.0, np.float32)],
+                 classes=np.array(list(d["classes"]) + extra))
+        cls.reader_rd = FontReader(model, min_literal_score=-1.0)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_prod_needs_r_and_d(self):
+        self.assertTrue(self.reader_rd.supports(TPL_PROD))
+        if "R" not in self.reader.idx:
+            self.assertFalse(self.reader.supports(TPL_PROD))
+
+    def test_literal_o_is_read_with_the_0_class_on_a_real_crop(self):
+        # "BB 02/25" printed; template with a literal O where the 0 is.
+        r = self.reader.read(cv2.imread(str(FIX / "3030_crossing_ribs.png")), ["#### ##:##", "BB O#/##"])
+        self.assertEqual(r["text"], "3030 22:42 BB O2/25")
+        self.assertTrue(r["trusted"])
+
+    def test_prod_decode(self):
+        rd = self.reader_rd
+        text = "628822:00PROD10/26"                    # cells in reading order
+        probs = np.full((len(text), len(rd.classes)), 1e-4)
+        for i, ch in enumerate(text):
+            probs[i, rd.idx["0" if ch == "O" else ch]] = 1.0
+        lines, lit, conf = rd._decode(probs, TPL_PROD)
+        self.assertEqual(lines, ["6288 22:00", "PROD 10/26"])
+        self.assertGreater(lit, -0.01)                 # the O cell scored as 0 -> a clear literal
+        self.assertGreater(conf, 0.99)
+
+    def test_digit_positions_are_never_mapped(self):
+        rd = self.reader_rd
+        # The digits 0 stay digits; the "O" scored at the literal position
+        # only ever comes from the template.
+        probs = np.full((18, len(rd.classes)), 1e-4)
+        for i, ch in enumerate("000000:00PROD00/00"):
+            probs[i, rd.idx["0" if ch == "O" else ch]] = 1.0
+        lines, _, _ = rd._decode(probs, TPL_PROD)
+        self.assertEqual(lines, ["0000 00:00", "PROD 00/00"])
+
+    def test_a_prod_read_is_validated_and_accepted(self):
+        from backend.detection.ocread import engine
+        e = engine.OCRead()
+        e.dynamic_roi_debug_dir = None
+        e.validators = [engine.CodeTemplate(f, value_pattern=(
+            r"^\d{4} ([01]\d|2[0-3]):[0-5]\d( (BB|EXP|PROD) (0[1-9]|1[0-2])/\d{2})?$")) for f in DEFAULT_FORMATS]
+        e.skipped_formats = []
+        e.font_reader = _PerFormatReader({tuple(TPL_PROD): _res("6288 22:00", "PROD 10/26")})
+        r = e.read(np.full((480, 744, 3), 190, np.uint8))
+        self.assertEqual(r["text"], "6288 22:00 PROD 10/26")
+        self.assertEqual(r["validation"]["format"], TPL_PROD)
 
 
 if __name__ == "__main__":

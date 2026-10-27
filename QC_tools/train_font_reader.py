@@ -31,10 +31,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from backend.detection.ocr.font_reader import FontReader, cells_from, ink_maps, segment, DEFAULT_MODEL
+from backend.detection.ocr.font_reader import FontReader, cells_from, ink_maps, literal_class, segment, DEFAULT_MODEL
 
 NAME = re.compile(r"Time_(\d+)-(\d+)-(\d+)_(\d+)-(\d+)-(\d+)_")
-NEW_CLASSES = ["E", "X", "P"]
+NEW_CLASSES = ["E", "X", "P", "R", "D"]      # O is not a class: it is scored as 0
 CELL_W, CELL_H = 16, 24
 
 # 5x7 dot font for the synthetic training codes (as used for the first model).
@@ -47,20 +47,28 @@ FONT = {
     "B": ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."], ":": [".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."],
     "/": [".....", "....#", "...#.", "..#..", ".#...", "#....", "....."], "E": ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
     "X": ["#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"], "P": ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
+    "R": ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"], "D": ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
 }
+FONT["O"] = FONT["0"]                               # same glyph in this dot font
+SYNTH_PREFIXES = ["BB", "EXP", "PROD"]
+SYNTH_SINGLE_LINE = 0.15                            # share of single-line synthetic codes
 
 
 def synth_cells(n_codes, rng):
-    """Random two-line codes in the dot font with rib shadows, through the same
-    ink map and cell cutting as the real images -> (cells, labels)."""
+    """Random codes in the dot font with rib shadows (line 2 prefix BB / EXP /
+    PROD, some single-line codes), through the same ink map and cell cutting
+    as the real images -> (cells, labels). Labels are classifier classes
+    (O -> 0)."""
     X, Y = [], []
     for _ in range(n_codes):
         d = lambda: str(rng.integers(10))
-        prefix = "EXP" if rng.random() < 0.5 else "BB"
+        prefix = SYNTH_PREFIXES[int(rng.integers(len(SYNTH_PREFIXES)))]
         lines = ["".join(d() for _ in range(4)) + " " + d() + d() + ":" + d() + d(), prefix + " " + d() + d() + "/" + d() + d()]
+        if rng.random() < SYNTH_SINGLE_LINE:
+            lines = lines[:1]
         ch = rng.uniform(15, 24); py = ch / 6.5; px = py * rng.uniform(0.9, 1.15); adv = 6 * px * rng.uniform(0.95, 1.1)
         slant = rng.uniform(-0.05, 0.25); r = py * rng.uniform(0.33, 0.55); gap = ch * rng.uniform(0.2, 0.6)
-        W, H = int(adv * 11 + 60), int(2 * ch + gap + 50)
+        W, H = int(adv * 11 + 60), int(len(lines) * ch + (len(lines) - 1) * gap + 50)
         base = rng.uniform(150, 215)
         img = np.full((H, W), base, np.float32) + np.linspace(0, rng.uniform(-25, 25), W)[None, :]
         S = 4; mask = np.zeros((H * S, W * S), np.float32); boxes = []
@@ -90,7 +98,7 @@ def synth_cells(n_codes, rng):
             w, h = a1 - a0, b1 - b0; jx, jy = rng.normal(0, 0.12 * w), rng.normal(0, 0.06 * h); pad = h / 8
             t, u = int(round(b0 + jy - pad)), int(round(b1 + jy + pad)); l, rgt = int(round(a0 + jx)), int(round(a1 + jx))
             cell = boosted[max(0, t):max(t + 1, u), max(0, l):max(l + 1, rgt)]
-            X.append(cv2.resize(cell, (CELL_W, CELL_H), interpolation=cv2.INTER_AREA)); Y.append(c)
+            X.append(cv2.resize(cell, (CELL_W, CELL_H), interpolation=cv2.INTER_AREA)); Y.append(literal_class(c))
     return X, Y
 
 
@@ -149,7 +157,7 @@ def best_layout(reader, crop, line1, date, formats, min_fit):
             if len(cells) != len(labels):
                 continue
             p = reader._predict(cells)
-            known = [(i, reader.idx[c]) for i, c in enumerate(labels) if c in reader.idx]
+            known = [(i, reader.idx[literal_class(c)]) for i, c in enumerate(labels) if literal_class(c) in reader.idx]
             score = float(np.mean([np.log(p[i, j] + 1e-9) for i, j in known]))
             key = (score >= min_fit, len(tpl), score)
             if best is None or key > best_key:
@@ -225,7 +233,7 @@ def main(argv=None):
         for i, (p, l1) in enumerate(items):
             split[p] = "train" if i % 2 == 0 else "test"
 
-    t0 = time.time(); samples = []; skipped = Counter()
+    t0 = time.time(); samples = []; skipped = Counter(); no_fit = []
     for p, l1 in ((p, l1) for items in per_day.values() for p, l1 in items):
         img = cv2.imread(str(p))
         if img is None:
@@ -233,7 +241,7 @@ def main(argv=None):
         crop = crop_of(engine, img, args.max_width)
         fit = best_layout(old, crop, l1, args.date, formats, args.min_fit)
         if fit is None or fit[3] < args.min_fit:
-            skipped["print does not fit"] += 1; continue
+            skipped["print does not fit"] += 1; no_fit.append(p.name); continue
         tpl, labels, cells, score = fit
         samples.append({"path": p, "split": split[p], "template": tpl, "labels": labels, "cells": cells,
                         "text": " ".join(label_lines(tpl, l1, args.date)),   # e.g. "6274 09:23 BB 05/28"
@@ -245,6 +253,7 @@ def main(argv=None):
     for s in (s for s in samples if s["split"] == "train"):
         for cell, lab in zip(s["cells"], s["labels"]):
             reps = 40 if lab in NEW_CLASSES else 12
+            lab = literal_class(lab)                    # O -> 0 (same glyph)
             X.append(cell); Y.append(idx[lab])
             for _ in range(reps):
                 X.append(augment(cell, rng)); Y.append(idx[lab])
@@ -283,6 +292,9 @@ def main(argv=None):
         cv2.imwrite(str(args.out.parent / "contact_sheet.png"),
                     np.vstack([cv2.copyMakeBorder(r, 0, 3, 0, wmax - r.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255)) for r in rows]))
     report = {"images": len(files), "used": len(samples), "skipped": dict(skipped),
+              # Images that fit none of the configured formats (a new print
+              # format shows up here instead of disappearing in "skipped").
+              "no_fit_images": no_fit,
               "train_images": sum(s["split"] == "train" for s in samples),
               "test_images": sum(s["split"] == "test" for s in samples),
               "train_cells": len(Y), "classes": classes,

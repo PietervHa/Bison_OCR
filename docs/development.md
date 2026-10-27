@@ -57,7 +57,7 @@ This writes files on every read, so leave it off in production.
 
 ## Changing the print format
 
-The font reader reads formats of one or two lines made of digits plus the literals the model knows (`B`, `:` and `/` with the current model). The formats are listed in `ocr.read_validation.templates`; for a new format add it there and make sure `value_pattern` accepts it. A format the model does not support is skipped with a warning at startup; if it supports none of them, every read is NOK with `ocr_engine_error`. To support new characters (e.g. `EXP`), retrain with `python -m QC_tools.train_font_reader <images_dir>`, which takes its formats from the same `templates` setting.
+The font reader reads formats of one or two lines made of digits plus the literals the model knows (`B`, `:` and `/` with the current model). The formats are listed in `ocr.read_validation.templates`; for a new format add it there and make sure `value_pattern` accepts it. A format the model does not support is skipped with a warning at startup; if it supports none of them, every read is NOK with `ocr_engine_error`. To support new characters (e.g. `EXP`, `PROD`), retrain with `python -m QC_tools.train_font_reader <images_dir>`, which takes its formats from the same `templates` setting. It adds the classes `E`, `X`, `P`, `R` and `D` (`O` is trained and read as `0`, the same glyph). Its report lists the images that fit none of the configured formats under `no_fit_images`, so a new print format shows up there.
 
 ## Rules worth keeping
 

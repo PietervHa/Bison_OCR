@@ -35,7 +35,8 @@ Pipeline, per deskewed crop from the text locator:
      confident enough.
 
 Supports templates of one or two lines made of '#' digit positions,
-spaces and literals the model knows (B : / with the current model; e.g.
+spaces and literals the model knows (B : / with the current model; a
+literal O is scored with the 0 class, see LITERAL_CLASS; e.g.
 ["#### ##:##", "BB ##/##"] or ["#### ##:##"]). Other templates -> not
 supported (read() returns None); OCRead skips such a format.
 """
@@ -52,6 +53,16 @@ from backend.detection.ocr.dot_text import clean_dot_text
 
 DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "font_reader.npz"
 CELL_W, CELL_H = 16, 24
+# Literals scored with another class: in this dot font the letter O and the
+# digit 0 are the same glyph, so a literal "O" (e.g. "PROD ##/##") is scored
+# with the "0" class. Only literal positions - a digit position is never
+# mapped to or from a letter.
+LITERAL_CLASS = {"O": "0"}
+
+
+def literal_class(ch):
+    """The classifier class a literal template character is scored with."""
+    return LITERAL_CLASS.get(ch, ch)
 # One-line template: the crop holds a second line when the best two-band fit
 # scores more than this times the best one-band fit. On one line the two-band
 # fit only splits that line (ratio 1.00 on the fixture crops); on two-line
@@ -201,7 +212,7 @@ class FontReader:
         self.early_exit_literal = early_exit_literal
 
     def supports(self, template) -> bool:
-        return all(ch == "#" or ch == " " or ch in self.idx for line in template for ch in line)
+        return all(ch == "#" or ch == " " or literal_class(ch) in self.idx for line in template for ch in line)
 
     def _predict(self, cells):
         x = np.asarray(cells, np.float32).reshape(len(cells), -1)
@@ -220,7 +231,7 @@ class FontReader:
                 j = self.digits[int(np.argmax(p[self.digits]))]
                 chars.append(self.classes[j]); conf = min(conf, float(p[j]))
             else:
-                chars.append(pos); lit.append(float(np.log(p[self.idx[pos]] + 1e-9)))
+                chars.append(pos); lit.append(float(np.log(p[self.idx[literal_class(pos)]] + 1e-9)))
         it = iter(chars)
         lines = ["".join(" " if ch == " " else next(it) for ch in line) for line in template]
         return lines, (float(np.mean(lit)) if lit else 0.0), conf

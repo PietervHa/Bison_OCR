@@ -49,8 +49,9 @@ ocr:
     # printed line. # = digit, A = letter, * = any character, space = gap
     # between fields, anything else must be printed literally.
     # Every format the font reader model supports is tried on each crop; a
-    # format with characters the model doesn't know (E, X, P with the
-    # current model) is skipped with a warning at startup. Of the trusted
+    # format with characters the model doesn't know (E, X, P, R, D with the
+    # current model) is skipped with a warning at startup. A literal O is
+    # read as 0 (same glyph in this dot font). Of the trusted
     # reads the format with more lines wins, so a two-line print is never
     # accepted as the single-line format. The chosen format is logged.
     # This is product-specific: change it when the printer format changes.
@@ -58,10 +59,11 @@ ocr:
     templates:
       - ["#### ##:##", "BB ##/##"]
       - ["#### ##:##", "EXP ##/##"]
+      - ["#### ##:##", "PROD ##/##"]
       - ["#### ##:##"]
     # Optional regex the canonical code must fully match (value sanity:
     # hour 00-23, minute 00-59, month 01-12), for all formats. '' to disable.
-    value_pattern: '^\d{4} ([01]\d|2[0-3]):[0-5]\d( (BB|EXP) (0[1-9]|1[0-2])/\d{2})?$'
+    value_pattern: '^\d{4} ([01]\d|2[0-3]):[0-5]\d( (BB|EXP|PROD) (0[1-9]|1[0-2])/\d{2})?$'
     # Template matching settings (code_validator.py). The font reader's
     # lines are checked at confidence 1.0, so min_confidence never rejects
     # them; its own gates are min_literal_score / min_digit_confidence above.

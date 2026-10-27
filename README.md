@@ -1,6 +1,6 @@
 # Bison OCR – OCRead
 
-Reads the dot-printed code on bottle caps (e.g. `4113 08:26` / `BB 05/26`, `6274 05:58` / `EXP 05/28`, or the single line `6286 16:24`) on the MDE Automation production line. A camera frame goes through a classical-CV text locator and a classifier trained on the printer's dot font (the "font reader"). The read is then checked against the print format. The result goes to the PLC over TCP and is shown on a web HMI.
+Reads the dot-printed code on bottle caps (e.g. `4113 08:26` / `BB 05/26`, `6274 05:58` / `EXP 05/28`, `6288 22:00` / `PROD 10/26`, or the single line `6286 16:24`) on the MDE Automation production line. A camera frame goes through a classical-CV text locator and a classifier trained on the printer's dot font (the "font reader"). The read is then checked against the print format. The result goes to the PLC over TCP and is shown on a web HMI.
 
 A read is either a validated code or an explicit NOK with a reason. A rejected read never shows or sends a guessed code.
 
