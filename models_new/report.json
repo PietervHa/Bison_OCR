@@ -1,5 +1,6 @@
 {
  "images": 514,
+ "scorer": "C:\\Users\\Pieter van Haaften\\Documents\\Bison_OCR\\backend\\detection\\ocr\\models\\font_reader.npz",
  "used": 49,
  "skipped": {
   "':' not read at its position": 432,
@@ -520,5 +521,5 @@
    "6288 15:21 BB 05/38"
   ]
  ],
- "seconds": 2548
+ "seconds": 332
 }

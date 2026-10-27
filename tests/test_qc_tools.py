@@ -86,5 +86,58 @@ class TrainFontReaderLabelTests(unittest.TestCase):
         self.assertIsNone(capture_time("photo.jpg"))
 
 
+class TrainFontReaderLiteralCheckTests(unittest.TestCase):
+    """literal_check: fixed characters must read as themselves, letters the
+    model doesn't know must at least have print in their cell."""
+    CLASSES = [str(d) for d in range(10)] + ["B", ":", "/"]
+
+    def _check(self, template, text, ink=None):
+        import numpy as np
+        from types import SimpleNamespace
+        from QC_tools.train_font_reader import literal_check
+        reader = SimpleNamespace(idx={c: i for i, c in enumerate(self.CLASSES)})
+        pos = [c for c in text if c != " "]
+        p = np.full((len(pos), len(self.CLASSES)), 0.01)
+        for i, c in enumerate(pos):
+            if c in reader.idx:
+                p[i, reader.idx[c]] = 0.9           # the model reads what is printed
+        cells = [np.full((24, 16), (ink or {}).get(i, 0.2), np.float32) for i in range(len(pos))]
+        return literal_check(reader, template, cells, p)
+
+    def test_matching_print_passes(self):
+        self.assertIsNone(self._check(["#### ##:##", "BB ##/##"], "6274 09:16 BB 05/28"))
+
+    def test_grid_shifted_by_one_fails_on_colon(self):
+        self.assertEqual(self._check(["#### ##:##"], "274 09:16 2"), "':' not read at its position")
+
+    def test_b_must_read_as_b(self):
+        self.assertEqual(self._check(["#### ##:##", "BB ##/##"], "6274 09:16 EX 05/28"), "'B' not read at its position")
+
+    def test_unknown_letter_on_an_empty_cell_fails(self):
+        # EXP grid on a BB print: the P lands on the gap before the date
+        self.assertEqual(self._check(["#### ##:##", "EXP ##/##"], "6274 09:16 BBP 05/28", ink={11: 0.01}),
+                         "no print at letter 'P'")
+        self.assertIsNone(self._check(["#### ##:##", "EXP ##/##"], "6274 09:16 EXP 05/28"))
+
+
+class TrainFontReaderSegmentFormatsTests(unittest.TestCase):
+    """segment_formats (shared work across formats) gives exactly what
+    font_reader.segment() gives per format, orientation and angle search."""
+
+    def test_same_as_segment_per_format(self):
+        import cv2
+        from backend.detection.ocr.font_reader import ink_maps, segment
+        from QC_tools.train_font_reader import segment_formats
+        fix = Path(__file__).resolve().parent / "fixtures" / "font_reader"
+        formats = [["#### ##:##", "BB ##/##"], ["#### ##:##", "EXP ##/##"], ["#### ##:##", "PROD ##/##"], ["#### ##:##"]]
+        for name in ("4113_upside_down.png", "3030_crossing_ribs.png"):
+            _, raw = ink_maps(cv2.imread(str(fix / name)))
+            got = list(segment_formats(raw, formats))
+            self.assertGreaterEqual(len(got), 2 * len(formats))
+            for tpl, (flip, first_deg), seg in got:
+                with self.subTest(name=name, tpl=tpl, flip=flip, first_deg=first_deg):
+                    self.assertEqual(seg, segment(raw[::-1, ::-1].copy() if flip else raw, tpl, first_deg=first_deg))
+
+
 if __name__ == "__main__":
     unittest.main()

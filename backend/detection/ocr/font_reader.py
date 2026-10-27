@@ -171,8 +171,11 @@ def segment(fit_ink, template, first_deg=8.0):
     ang = _deskew(fit_ink, first_deg=first_deg)
     f = _rotate(fit_ink, ang)
     score, bands = _fit_lines(f, len(template))
-    lines = [_fit_cells(f, band, tl)[1] for band, tl in zip(bands, template)]
-    seg = {"angle": ang, "bands": bands, "lines": lines, "second_line": False}
+    fits = [_fit_cells(f, band, tl) for band, tl in zip(bands, template)]
+    # line_fit: the grid-fit score per line (how well the template's cell
+    # layout matches the column profile), for comparing formats.
+    seg = {"angle": ang, "bands": bands, "lines": [g for _, g in fits],
+           "line_fit": [s for s, _ in fits], "second_line": False}
     if len(template) == 1:
         seg["second_line"] = _fit_lines(f, 2)[0] > SECOND_LINE_RATIO * score
     return seg

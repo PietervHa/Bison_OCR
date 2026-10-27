@@ -8,17 +8,26 @@ Labels come from the file names (camera software format
            minute can differ by one from the capture time: the candidates are
            capture time -60 s, +0 s and +30 s (rounded down to the minute,
            duplicates removed), e.g. 1 Oct 2026 10:28:51 -> "6274 10:27",
-           "6274 10:28", "6274 10:29". The candidate the current model fits
+           "6274 10:28", "6274 10:29". The candidate the scorer model fits
            best is used (chosen together with orientation and format), for
            training and as the truth in the test; the report counts how
            often each was chosen.
   line 2 = the format's second line with the date filled in (--date, default
            05/28), e.g. "BB 05/28" or "EXP 05/28"; empty for a single-line
            format. The formats come from the config
-           (ocr.read_validation.templates); per image the format the current
-           model fits best is used, a format with more lines first.
-Images where the cutter fails clearly are left out; contact_sheet.png next to
-the model shows training cells with their labels for a visual check.
+           (ocr.read_validation.templates); per image the format the scorer
+           confirms and whose grid fits best is used, a format with more lines first
+           (see best_layout).
+Labelling uses the --scorer model (default: the production model). An image
+is left out when the fixed characters (":", "/", "B" and every other letter
+the scorer knows) don't read as themselves (grid shifted, wrong orientation
+or format), when a letter the scorer doesn't know lands on an empty cell, or
+when the fit is clearly bad (--min-fit).
+Bootstrap for formats the production model can't verify (EXP, PROD): train
+once, then train again with --scorer set to that model, which learned
+E/X/P/R/D from the synthetic codes and so confirms EXP and PROD prints. contact_sheet.png next to the model shows
+training cells with their labels, rejected_sheet.png rejected images with the
+reason per row, for a visual check.
 Synthetic codes in the 5x7 dot font (incl. E, X, P) are added (--synth).
 
 Half of the images per day are used for training, the other half is a test
@@ -28,17 +37,20 @@ backend/detection/ocr/models/font_reader.npz) and a JSON report.
 
 Usage:
     python -m QC_tools.train_font_reader <images_dir> --out models_new/font_reader.npz
+    python -m QC_tools.train_font_reader <images_dir> --scorer models_new/font_reader.npz --out models_new/font_reader_2.npz
+Images are labelled in parallel (--workers, default CPU cores - 1).
 """
 from __future__ import annotations
 
-import argparse, datetime, json, re, sys, time
+import argparse, datetime, json, logging, multiprocessing, os, re, sys, time
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from backend.detection.ocr.font_reader import FontReader, cells_from, ink_maps, literal_class, segment, DEFAULT_MODEL
+from backend.detection.ocr.font_reader import (FontReader, cells_from, ink_maps, literal_class, DEFAULT_MODEL,
+                                               SECOND_LINE_RATIO, _deskew, _fit_cells, _fit_lines, _rotate)
 
 NAME = re.compile(r"Time_(\d+)-(\d+)-(\d+)_(\d+)-(\d+)-(\d+)_")
 NEW_CLASSES = ["E", "X", "P", "R", "D"]      # O is not a class: it is scored as 0
@@ -169,36 +181,168 @@ def crop_of(engine, img, max_width):
     return engine._prepare(img)[0]
 
 
-def best_layout(reader, crop, line1_cands, date, formats, min_fit):
-    """Orientation + format + line 1 candidate that the current model fits best;
-    returns (template, labels, cells, score, line1, minute_delta) or None.
-    line1_cands: [(minute_delta, text)] from line1_candidates().
-    A format with more lines wins when its fit reaches min_fit (a two-line print
-    also fits the single-line format on line 1; the font reader refuses that,
-    and so does this). Like FontReader.read, the grid is fitted with the
-    narrow (+/-8 deg) and the full (+/-30 deg) angle search; some crops only
-    segment correctly with the full search."""
-    boosted, raw = ink_maps(crop)
-    best, best_key = None, None
-    for tpl in formats:
-        for flip, first_deg in ((f, d) for f in (False, True) for d in (8.0, 30.0)):
-            seg = segment(raw[::-1, ::-1].copy() if flip else raw, tpl, first_deg=first_deg)
-            if seg["second_line"]:
+# A fixed character the current model knows (":", "/", "B", O as 0) must read
+# as itself with more than this probability, or the grid is off (shifted by a
+# character, wrong orientation, wrong format).
+MIN_LITERAL_P = 0.5
+# A letter the current model does not know (E, X, P, R, D) can't be checked by
+# the model; its cell must at least hold print: mean ink at least this times
+# the median digit cell. On a BB print the EXP/PROD grid puts a letter on the
+# gap between "BB" and the date (ink ~0.01 vs ~0.2 for a digit).
+MIN_LETTER_INK = 0.3
+
+
+def literal_check(reader, template, cells, p):
+    """None when the fixed characters of the template land where they belong
+    on these cells (model probabilities p), else the reason they don't."""
+    pos = [ch for line in template for ch in line if ch != " "]
+    ink = [float(np.clip(c, 0, None).mean()) for c in cells]
+    digit_ink = float(np.median([ink[i] for i, ch in enumerate(pos) if ch == "#"] or [0.0]))
+    for i, ch in enumerate(pos):
+        if ch == "#":
+            continue
+        k = literal_class(ch)
+        if k in reader.idx:
+            if p[i, reader.idx[k]] <= MIN_LITERAL_P:
+                return f"'{ch}' not read at its position"
+        elif ink[i] < MIN_LETTER_INK * digit_ink:
+            return f"no print at letter '{ch}'"
+    return None
+
+
+def segment_formats(raw, formats):
+    """font_reader.segment() for every format, orientation and angle search
+    (+/-8 and +/-30 deg, as FontReader.read), with the shared work done once:
+    the skew angle per orientation and search range (an angle already seen
+    in that orientation is not segmented again - same result), the text
+    bands per number of lines, and the cell grid per (band, template line),
+    e.g. line 1 "#### ##:##" once for BB, EXP and PROD.
+    Yields (template, (flipped, first_deg), seg) with seg as segment()."""
+    for flip in (False, True):
+        fit_ink = raw[::-1, ::-1].copy() if flip else raw
+        seen = set()
+        for first_deg in (8.0, 30.0):
+            ang = _deskew(fit_ink, first_deg=first_deg)
+            if ang in seen:
                 continue
-            cells = cells_from(boosted, seg, flip)
-            p = None
-            for delta, line1 in line1_cands:
-                labels = flat(tpl, label_lines(tpl, line1, date))
-                if len(cells) != len(labels):
-                    continue
-                if p is None:
-                    p = reader._predict(cells)
-                known = [(i, reader.idx[literal_class(c)]) for i, c in enumerate(labels) if literal_class(c) in reader.idx]
-                score = float(np.mean([np.log(p[i, j] + 1e-9) for i, j in known]))
-                key = (score >= min_fit, len(tpl), score)
-                if best is None or key > best_key:
-                    best, best_key = (tpl, labels, cells, score, line1, delta), key
+            seen.add(ang)
+            f = _rotate(fit_ink, ang)
+            bands = {n: _fit_lines(f, n) for n in {len(t) for t in formats} | {2}}
+            grids = {}
+            for tpl in formats:
+                score, bb = bands[len(tpl)]
+                for band, tl in zip(bb, tpl):
+                    if (band, tl) not in grids:
+                        grids[band, tl] = _fit_cells(f, band, tl)
+                fits = [grids[band, tl] for band, tl in zip(bb, tpl)]
+                yield tpl, (flip, first_deg), {
+                    "angle": ang, "bands": bb, "lines": [g for _, g in fits], "line_fit": [s for s, _ in fits],
+                    "second_line": len(tpl) == 1 and bands[2][0] > SECOND_LINE_RATIO * score}
+
+
+def best_layout(reader, crop, line1_cands, date, formats, min_fit):
+    """Orientation, format and line 1 candidate for a crop. Returns None when
+    no grid fits at all, else dict(template, labels, cells, score, line1,
+    delta, reason): reason None = usable sample, else why it is rejected
+    (labels/cells then show the closest layout, for the rejected sheet).
+    line1_cands: [(minute_delta, text)] from line1_candidates().
+
+    Per number of lines (more lines first; a single-line format is not fitted
+    on a crop that holds two lines, as in the font reader):
+      1. orientation (and angle search, +/-8 or +/-30 deg as FontReader.read):
+         line 1's fixed characters (":") must read right, then the best
+         line 1 grid fit;
+      2. format: every fixed character must pass literal_check(); a format
+         the model can verify completely (BB) wins over one with letters it
+         doesn't know (EXP, PROD), then the best line 2 grid fit. The model's
+         score on the known positions never chooses the format: with unknown
+         letters left out it favours the wrong one.
+      3. line 1 candidate: best mean log-probability; below min_fit rejected."""
+    boosted, raw = ink_maps(crop)
+    cands = []
+    for tpl, (flip, first_deg), seg in segment_formats(raw, formats):
+        n_pos = sum(ch != " " for line in tpl for ch in line)
+        n_line1 = sum(ch != " " for ch in tpl[0])
+        if seg["second_line"]:
+            continue
+        cells = cells_from(boosted, seg, flip)
+        if len(cells) != n_pos:
+            continue
+        p = reader._predict(cells)
+        cands.append({"tpl": tpl, "orient": (flip, first_deg), "cells": cells, "p": p, "fit": seg["line_fit"],
+                      "line1_ok": literal_check(reader, tpl[:1], cells[:n_line1], p[:n_line1]) is None,
+                      "reason": literal_check(reader, tpl, cells, p),
+                      "verified": reader.supports(tpl)})
+    if not cands:
+        return None
+    for n_lines in sorted({len(c["tpl"]) for c in cands}, reverse=True):
+        group = [c for c in cands if len(c["tpl"]) == n_lines]
+        orient = max(group, key=lambda c: (c["line1_ok"], c["fit"][0]))["orient"]
+        same = [c for c in group if c["orient"] == orient]
+        ok = [c for c in same if c["reason"] is None]
+        chosen = max(ok or same, key=lambda c: (c["verified"], c["fit"][-1]))
+        if ok:
+            break
+    best = None
+    for delta, line1 in line1_cands:
+        labels = flat(chosen["tpl"], label_lines(chosen["tpl"], line1, date))
+        known = [(i, reader.idx[literal_class(c)]) for i, c in enumerate(labels) if literal_class(c) in reader.idx]
+        score = float(np.mean([np.log(chosen["p"][i, j] + 1e-9) for i, j in known]))
+        if best is None or score > best["score"]:
+            best = {"template": chosen["tpl"], "labels": labels, "cells": chosen["cells"], "score": score,
+                    "line1": line1, "delta": delta, "reason": chosen["reason"]}
+    if best["reason"] is None and best["score"] < min_fit:
+        best["reason"] = "fit below --min-fit"
     return best
+
+
+def write_sheet(path, rows):
+    """Cells with their label above each, one row per sample, optionally with
+    a caption line above the row; rows = [(cells, labels, caption or None)].
+    Nothing is written for no rows."""
+    out = []
+    for cells, labels, caption in rows:
+        row = np.hstack([cv2.copyMakeBorder((255 - np.clip(c / max(c.max(), 1e-3), 0, 1) * 255).astype(np.uint8), 14, 2, 1, 1, cv2.BORDER_CONSTANT, value=255) for c in cells])
+        row = cv2.cvtColor(row, cv2.COLOR_GRAY2BGR)
+        for k, lab in enumerate(labels):
+            cv2.putText(row, lab, (k * (CELL_W + 2) + 4, 11), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+        if caption:
+            cap = np.full((14, max(row.shape[1], 8 * len(caption)), 3), 255, np.uint8)
+            cv2.putText(cap, caption, (2, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+            row = np.vstack([cap, cv2.copyMakeBorder(row, 0, 0, 0, cap.shape[1] - row.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255))])
+        out.append(row)
+    if out:
+        wmax = max(r.shape[1] for r in out)
+        cv2.imwrite(str(path), np.vstack([cv2.copyMakeBorder(r, 0, 3, 0, wmax - r.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255)) for r in out]))
+
+
+_WORKER = {}
+
+
+def _init_worker(scorer_path, max_width):
+    """Per labelling process: the OCRead engine (for the crop and the
+    configured formats) and the scorer model."""
+    from backend.detection.ocread.engine import OCRead
+    if multiprocessing.parent_process() is not None:
+        # Not the OCRead startup warnings once per process (formats the
+        # production model skips; labelling uses the scorer, not OCRead's reader).
+        logging.disable(logging.WARNING)
+    engine = OCRead()
+    for a in ("debug_dir", "dynamic_roi_debug_dir"):
+        if hasattr(engine, a):
+            setattr(engine, a, None)
+    _WORKER.update(engine=engine, scorer=FontReader(scorer_path, min_literal_score=-1.0), max_width=max_width,
+                   formats=[v.lines for v in engine.validators])     # ocr.read_validation.templates
+
+
+def _label_image(job):
+    """(path, crop, best_layout() result) for one image; crop None = unreadable."""
+    p, t, date, min_fit = job
+    img = cv2.imread(str(p))
+    if img is None:
+        return p, None, None
+    crop = crop_of(_WORKER["engine"], img, _WORKER["max_width"])
+    return p, crop, best_layout(_WORKER["scorer"], crop, line1_candidates(t), date, _WORKER["formats"], min_fit)
 
 
 def augment(cell, rng):
@@ -247,15 +391,15 @@ def main(argv=None):
     ap.add_argument("--max-width", type=int, default=744)
     ap.add_argument("--min-fit", type=float, default=-4.0, help="leave out only clear failures (old model fit below this)")
     ap.add_argument("--synth", type=int, default=1500, help="synthetic codes to add (0 = none)")
+    ap.add_argument("--scorer", type=Path, default=DEFAULT_MODEL,
+                    help="model that labels the images (format, orientation, checks); default the production "
+                         "model. A model that knows E/X/P/R/D (e.g. an earlier models_new/font_reader.npz) "
+                         "also confirms EXP and PROD prints")
+    ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
+                    help="processes for labelling the images (default: CPU cores - 1)")
     args = ap.parse_args(argv)
 
-    from backend.detection.ocread.engine import OCRead
-    engine = OCRead()
-    for a in ("debug_dir", "dynamic_roi_debug_dir"):
-        if hasattr(engine, a):
-            setattr(engine, a, None)
     old = FontReader(DEFAULT_MODEL, min_literal_score=-1.0)
-    formats = [v.lines for v in engine.validators]          # ocr.read_validation.templates
 
     files = sorted((p for p in args.images.rglob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")),
                    key=lambda p: capture_time(p) or datetime.datetime.min)
@@ -269,20 +413,31 @@ def main(argv=None):
         for i, (p, t) in enumerate(items):
             split[p] = "train" if i % 2 == 0 else "test"
 
-    t0 = time.time(); samples = []; skipped = Counter(); no_fit = []; line1_chosen = Counter()
-    for p, t in ((p, t) for items in per_day.values() for p, t in items):
-        img = cv2.imread(str(p))
-        if img is None:
+    t0 = time.time(); samples = []; skipped = Counter(); no_fit = []; line1_chosen = Counter(); rejected = []
+    jobs = [(p, t, args.date, args.min_fit) for items in per_day.values() for p, t in items]
+    init = (str(args.scorer), args.max_width)
+    if args.workers > 1:
+        pool = multiprocessing.Pool(args.workers, initializer=_init_worker, initargs=init)
+        results = pool.imap(_label_image, jobs, chunksize=4)
+    else:
+        pool = None; _init_worker(*init)
+        results = map(_label_image, jobs)
+    for p, crop, fit in results:
+        if crop is None:
             skipped["unreadable file"] += 1; continue
-        crop = crop_of(engine, img, args.max_width)
-        fit = best_layout(old, crop, line1_candidates(t), args.date, formats, args.min_fit)
-        if fit is None or fit[3] < args.min_fit:
-            skipped["print does not fit"] += 1; no_fit.append(p.name); continue
-        tpl, labels, cells, score, l1, delta = fit
+        if fit is None or fit["reason"]:
+            reason = fit["reason"] if fit else "no grid fits"
+            skipped[reason] += 1; no_fit.append(p.name)
+            if fit:
+                rejected.append((reason, p.name, fit))
+            continue
+        tpl, l1, delta = fit["template"], fit["line1"], fit["delta"]
         line1_chosen[f"{delta:+d} min" if delta else "same minute"] += 1
-        samples.append({"path": p, "split": split[p], "template": tpl, "labels": labels, "cells": cells,
+        samples.append({"path": p, "split": split[p], "template": tpl, "labels": fit["labels"], "cells": fit["cells"],
                         "text": " ".join(label_lines(tpl, l1, args.date)),   # e.g. "6274 09:23 BB 05/28"
-                        "crop": crop, "fit": score})
+                        "crop": crop, "fit": fit["score"]})
+    if pool:
+        pool.close(); pool.join()
     classes = list(old.classes) + [c for c in NEW_CLASSES if c not in old.classes]
     idx = {c: i for i, c in enumerate(classes)}
     rng = np.random.default_rng(1)
@@ -317,20 +472,18 @@ def main(argv=None):
             if name == "new" and k == "WRONG" and len(wrong) < 10:
                 wrong.append((s["path"].name, truth, r["text"]))
     sheet = [s for s in samples if s["split"] == "train"][:: max(1, len([s for s in samples if s["split"] == "train"]) // 12)][:12]
-    rows = []
-    for smp in sheet:
-        row = np.hstack([cv2.copyMakeBorder((255 - np.clip(c / max(c.max(), 1e-3), 0, 1) * 255).astype(np.uint8), 14, 2, 1, 1, cv2.BORDER_CONSTANT, value=255) for c in smp["cells"]])
-        row = cv2.cvtColor(row, cv2.COLOR_GRAY2BGR)
-        for k, lab in enumerate(smp["labels"]):
-            cv2.putText(row, lab, (k * (CELL_W + 2) + 4, 11), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
-        rows.append(row)
-    if rows:
-        wmax = max(r.shape[1] for r in rows)
-        cv2.imwrite(str(args.out.parent / "contact_sheet.png"),
-                    np.vstack([cv2.copyMakeBorder(r, 0, 3, 0, wmax - r.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255)) for r in rows]))
-    report = {"images": len(files), "used": len(samples), "skipped": dict(skipped),
-              # Images that fit none of the configured formats (a new print
-              # format shows up here instead of disappearing in "skipped").
+    write_sheet(args.out.parent / "contact_sheet.png", [(s["cells"], s["labels"], None) for s in sheet])
+    # Rejected samples with the reason per row (up to 6 per reason), to check
+    # the checks by eye: cells and labels of the closest layout.
+    per_reason = Counter(); rows = []
+    for reason, name, fit in rejected:
+        per_reason[reason] += 1
+        if per_reason[reason] <= 6:
+            rows.append((fit["cells"], fit["labels"], f"{reason} - {name}"))
+    write_sheet(args.out.parent / "rejected_sheet.png", rows)
+    report = {"images": len(files), "scorer": str(args.scorer), "used": len(samples), "skipped": dict(skipped),
+              # Images left out (reasons in "skipped", examples in
+              # rejected_sheet.png); a new print format shows up here.
               "no_fit_images": no_fit,
               # Which line 1 candidate was chosen, relative to the capture
               # minute (printer and camera clocks are not in sync).
@@ -338,6 +491,7 @@ def main(argv=None):
               "train_images": sum(s["split"] == "train" for s in samples),
               "test_images": sum(s["split"] == "test" for s in samples),
               "train_cells": len(Y), "classes": classes,
+              # Used images per format.
               "formats": dict(Counter(format_name(s["template"]) for s in samples)),
               "test_results": {k: dict(v) for k, v in res.items()}, "wrong_examples": wrong,
               "seconds": round(time.time() - t0)}
