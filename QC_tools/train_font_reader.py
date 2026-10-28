@@ -12,9 +12,10 @@ Labels come from the file names (camera software format
            best is used (chosen together with orientation and format), for
            training and as the truth in the test; the report counts how
            often each was chosen.
-  line 2 = the format's second line with the date filled in (--date, default
-           05/28), e.g. "BB 05/28" or "EXP 05/28"; empty for a single-line
-           format. The formats come from the config
+  line 2 = the format's second line with the date filled in: --date
+           (default 05/28) for BB and EXP, e.g. "BB 05/28" or "EXP 05/28";
+           for PROD the production month MM/YY of the capture date, e.g.
+           15-10-2026 -> "PROD 10/26"; empty for a single-line format. The formats come from the config
            (ocr.read_validation.templates); per image the format the scorer
            confirms and whose grid fits best is used, a format with more lines first
            (see best_layout).
@@ -153,16 +154,24 @@ def line1_candidates(t):
     return out
 
 
-def label_lines(template, line1, date):
+def line2_date(template, date, t):
+    """Date on line 2: PROD prints the production date (month/year of
+    printing), so MM/YY of capture time t; the other formats (BB, EXP) --date."""
+    return f"{t:%m/%y}" if format_name(template) == "PROD" else date
+
+
+def label_lines(template, line1, date, t):
     """Text per template line: line 1 from the file name, the '#' positions of
-    any further line filled with the digits of --date ("BB ##/##" -> "BB 05/28")."""
+    any further line filled with the digits of line2_date() ("BB ##/##" ->
+    "BB 05/28", "PROD ##/##" captured 15-10-2026 -> "PROD 10/26")."""
     out = [line1]
+    date = line2_date(template, date, t)
     for tl in template[1:]:
         digits = iter(c for c in date if c.isdigit())
         try:
             out.append("".join(next(digits) if ch == "#" else ch for ch in tl))
         except StopIteration:
-            raise ValueError(f"--date {date!r} has too few digits for {tl!r}") from None
+            raise ValueError(f"date {date!r} has too few digits for {tl!r}") from None
     return out
 
 
@@ -242,12 +251,13 @@ def segment_formats(raw, formats):
                     "second_line": len(tpl) == 1 and bands[2][0] > SECOND_LINE_RATIO * score}
 
 
-def best_layout(reader, crop, line1_cands, date, formats, min_fit):
+def best_layout(reader, crop, t, line1_cands, date, formats, min_fit):
     """Orientation, format and line 1 candidate for a crop. Returns None when
     no grid fits at all, else dict(template, labels, cells, score, line1,
     delta, reason): reason None = usable sample, else why it is rejected
     (labels/cells then show the closest layout, for the rejected sheet).
-    line1_cands: [(minute_delta, text)] from line1_candidates().
+    t: capture time (PROD's date); line1_cands: [(minute_delta, text)] from
+    line1_candidates().
 
     Per number of lines (more lines first; a single-line format is not fitted
     on a crop that holds two lines, as in the font reader):
@@ -287,7 +297,7 @@ def best_layout(reader, crop, line1_cands, date, formats, min_fit):
             break
     best = None
     for delta, line1 in line1_cands:
-        labels = flat(chosen["tpl"], label_lines(chosen["tpl"], line1, date))
+        labels = flat(chosen["tpl"], label_lines(chosen["tpl"], line1, date, t))
         known = [(i, reader.idx[literal_class(c)]) for i, c in enumerate(labels) if literal_class(c) in reader.idx]
         score = float(np.mean([np.log(chosen["p"][i, j] + 1e-9) for i, j in known]))
         if best is None or score > best["score"]:
@@ -318,12 +328,13 @@ def write_sheet(path, rows):
         cv2.imwrite(str(path), np.vstack([cv2.copyMakeBorder(r, 0, 3, 0, wmax - r.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255)) for r in out]))
 
 
-def debug_image(path, crop, line1, date, formats, out_dir, scale=3):
+def debug_image(path, crop, t, date, formats, out_dir, scale=3):
     """Debug images for one camera image: <stem>_crop.png (the locator crop)
     and per format and orientation (flipped, angle search) <stem>_<format>_
     <up|down>_<deg>.png: the crop as segmented (flipped, deskewed), enlarged,
     with the fitted line bands (blue) and cell boxes (green, spaces grey)
-    labelled with the expected character, and the band/grid fit scores."""
+    labelled with the expected character (line 1 at capture time t), and the
+    band/grid fit scores."""
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(path).stem
     cv2.imwrite(str(out_dir / f"{stem}_crop.png"), crop)
@@ -333,7 +344,7 @@ def debug_image(path, crop, line1, date, formats, out_dir, scale=3):
     for tpl, (flip, first_deg), seg in segment_formats(raw, formats):
         img = _rotate(gray[::-1, ::-1].copy() if flip else gray, seg["angle"])
         img = cv2.cvtColor(cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR)
-        text = label_lines(tpl, line1, date)
+        text = label_lines(tpl, line1_text(t), date, t)
         for (y0, y1), (labels, cells), want in zip(seg["bands"], seg["lines"], text):
             cv2.rectangle(img, (0, y0 * scale), (img.shape[1] - 1, y1 * scale), (255, 0, 0), 1)
             chars = iter(want.replace(" ", ""))      # the layout may or may not have the spaces
@@ -380,7 +391,7 @@ def _label_image(job):
     if img is None:
         return p, None, None
     crop = crop_of(_WORKER["engine"], img, _WORKER["max_width"])
-    return p, crop, best_layout(_WORKER["scorer"], crop, line1_candidates(t), date, _WORKER["formats"], min_fit)
+    return p, crop, best_layout(_WORKER["scorer"], crop, t, line1_candidates(t), date, _WORKER["formats"], min_fit)
 
 
 def augment(cell, rng):
@@ -425,7 +436,8 @@ def main(argv=None):
     ap.add_argument("images", type=Path)
     ap.add_argument("--out", type=Path, default=Path("models_new/font_reader.npz"))
     ap.add_argument("--report", type=Path, default=None)
-    ap.add_argument("--date", default="05/28", help="date on line 2, e.g. 05/28")
+    ap.add_argument("--date", default="05/28",
+                    help="date on line 2 of BB and EXP, e.g. 05/28 (PROD: month/year of the capture date)")
     ap.add_argument("--max-width", type=int, default=744)
     ap.add_argument("--min-fit", type=float, default=-4.0, help="leave out only clear failures (old model fit below this)")
     ap.add_argument("--synth", type=int, default=1500, help="synthetic codes to add (0 = none)")
@@ -452,7 +464,7 @@ def main(argv=None):
             if img is None or t is None:
                 print(f"{name}: not found / unreadable / no capture time in the name"); continue
             crop = crop_of(_WORKER["engine"], img, _WORKER["max_width"])
-            files = debug_image(p, crop, line1_text(t), args.date, _WORKER["formats"], debug_dir)
+            files = debug_image(p, crop, t, args.date, _WORKER["formats"], debug_dir)
             print(f"{name}: crop {crop.shape[1]}x{crop.shape[0]}, {len(files)} images in {debug_dir}")
         return 0
 
@@ -491,7 +503,7 @@ def main(argv=None):
         tpl, l1, delta = fit["template"], fit["line1"], fit["delta"]
         line1_chosen[f"{delta:+d} min" if delta else "same minute"] += 1
         samples.append({"path": p, "split": split[p], "template": tpl, "labels": fit["labels"], "cells": fit["cells"],
-                        "text": " ".join(label_lines(tpl, l1, args.date)),   # e.g. "6274 09:23 BB 05/28"
+                        "text": " ".join(label_lines(tpl, l1, args.date, capture_time(p))),   # e.g. "6274 09:23 BB 05/28"
                         "crop": crop, "fit": fit["score"]})
     if pool:
         pool.close(); pool.join()

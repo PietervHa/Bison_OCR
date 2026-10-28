@@ -85,6 +85,15 @@ class TrainFontReaderLabelTests(unittest.TestCase):
         from QC_tools.train_font_reader import capture_time
         self.assertIsNone(capture_time("photo.jpg"))
 
+    def test_line2_date_per_format(self):
+        from QC_tools.train_font_reader import capture_time, label_lines
+        t = capture_time("UId_0_Time_15-10-2026_10-28-51_123.jpg")
+        # PROD prints the production month (capture date), BB/EXP --date
+        self.assertEqual(label_lines(["#### ##:##", "PROD ##/##"], "6288 10:28", "05/28", t), ["6288 10:28", "PROD 10/26"])
+        self.assertEqual(label_lines(["#### ##:##", "BB ##/##"], "6288 10:28", "05/28", t), ["6288 10:28", "BB 05/28"])
+        self.assertEqual(label_lines(["#### ##:##", "EXP ##/##"], "6288 10:28", "05/28", t), ["6288 10:28", "EXP 05/28"])
+        self.assertEqual(label_lines(["#### ##:##"], "6288 10:28", "05/28", t), ["6288 10:28"])
+
 
 class TrainFontReaderLiteralCheckTests(unittest.TestCase):
     """literal_check: fixed characters must read as themselves, letters the
