@@ -53,7 +53,7 @@ This writes files on every read, so leave it off in production.
 
 ## Logs
 
-`data/logs/vision.log` (DEBUG and up) and the console (INFO and up). Routine `/result` polling requests are filtered out. Every read logs a `VISION RESULT:` line with status, reason and cycle time.
+`data/logs/vision.log` and the console (both INFO and up). `vision.log` rotates at 5 MB, keeping 5 old files (`vision.log.1` ... `vision.log.5`). The access-log lines for the HMI's polling requests (`/result`, `/status`, `/camera_status`) are logged at DEBUG, so they are not written. Every read logs a `VISION RESULT:` line with status, reason and cycle time.
 
 ## Changing the print format
 
