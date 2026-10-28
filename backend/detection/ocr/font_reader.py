@@ -94,13 +94,20 @@ def _rotate(img, angle):
     return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR, borderValue=0)
 
 
-def _deskew(ink, max_deg=30.0, first_deg=8.0):
+def _deskew(ink, max_deg=30.0, first_deg=8.0, cache=None):
     """Residual skew: the angle with the sharpest row profile. The locator
     already levelled the crop, so search +/-first_deg first and only widen
-    to +/-max_deg when the best angle lies at the edge of that range."""
+    to +/-max_deg when the best angle lies at the edge of that range.
+    cache: dict angle -> sharpness for this ink, shared between calls (the
+    searches overlap; all angles are multiples of 0.5, so keys are exact)."""
+    cache = {} if cache is None else cache
+
     def sharp(a):
-        r = _rotate(ink, a).sum(axis=1)
-        return float((np.diff(r) ** 2).sum())
+        a = float(a)
+        if a not in cache:
+            r = _rotate(ink, a).sum(axis=1)
+            cache[a] = float((np.diff(r) ** 2).sum())
+        return cache[a]
     coarse = max(np.arange(-first_deg, first_deg + 1e-6, 2.0), key=sharp)
     if abs(coarse) >= first_deg - 1e-6 and max_deg > first_deg:
         coarse = max(np.arange(-max_deg, max_deg + 1e-6, 2.0), key=sharp)
@@ -119,14 +126,21 @@ def _fit_lines(fit, n_lines=2):
             if s[i] > best[0]:
                 best = (float(s[i]), [(int(ys[i]), int(ys[i] + h))])
             continue
-        for g in range(0, h + 1):
-            ys = np.arange(0, H - 2 * h - g + 1)
-            if len(ys) == 0:
-                continue
-            s = (c[ys + h] - c[ys]) + (c[ys + 2 * h + g] - c[ys + h + g])
-            i = int(np.argmax(s))
-            if s[i] > best[0]:
-                best = (float(s[i]), [(int(ys[i]), int(ys[i] + h)), (int(ys[i] + h + g), int(ys[i] + 2 * h + g))])
+        # All gaps g at once: row g, column y (padded with -inf past the
+        # last y for that gap). The first maximum in (g, y) order is the
+        # one the per-gap loop with a strict ">" kept.
+        gs = np.arange(0, h + 1)
+        n = H - 2 * h - gs + 1
+        if n.max() <= 0:
+            continue
+        ys = np.arange(0, n.max())
+        g, y = gs[:, None], ys[None, :]
+        s = (c[ys + h] - c[ys])[None, :] + (c[np.minimum(y + 2 * h + g, H)] - c[np.minimum(y + h + g, H)])
+        s[y >= n[:, None]] = -np.inf
+        gi, i = np.unravel_index(int(np.argmax(s)), s.shape)
+        if s[gi, i] > best[0]:
+            yb = int(ys[i])
+            best = (float(s[gi, i]), [(yb, yb + h), (yb + h + int(gi), yb + 2 * h + int(gi))])
     return best
 
 
@@ -166,27 +180,44 @@ def _fit_cells(fit, band, template_line, near_pitch=None):
     # offset) is computed element by element exactly as one pitch at a time,
     # and the first maximum in (layout, pitch, offset) order wins - the same
     # grid as the per-pitch loop, ~3x faster.
+    # The layouts of one line (space printed or not) share the per-cell
+    # terms: cell k at x0 + k * p is the same whatever kind it is, and a
+    # layout's offsets are a prefix of those of the layout with the fewest
+    # cells (same start and step, earlier stop). So the offsets and each
+    # cell's core/edge means are computed once on the widest grid and each
+    # layout uses its own columns of them.
     ps = np.arange(p_lo, p_hi, 0.25)
+    layouts = _layouts(template_line)
+    if not len(ps):
+        return (-1e18, None)
+    k_min = min(len(cells) for cells, _ in layouts)
+    rows = [np.arange(-0.5 * p, W - k_min * p * 0.8, 0.5) for p in ps]
+    x0 = np.zeros((len(ps), max(len(r) for r in rows)))
+    for r, xs in enumerate(rows):
+        x0[r, :len(xs)] = xs
+    p = ps[:, None]
+    core, edge = [], []                                 # per cell index k, computed on first use
+    left = None
     best = (-1e18, None)
-    for cells, labels in _layouts(template_line):
+    for cells, labels in layouts:
         K = len(cells)
-        rows = [np.arange(-0.5 * p, W - K * p * 0.8, 0.5) for p in ps]
-        n = max((len(r) for r in rows), default=0)
+        lens = np.array([len(np.arange(-0.5 * q, W - K * q * 0.8, 0.5)) for q in ps])
+        n = int(lens.max())
         if n == 0:
             continue
-        x0 = np.full((len(ps), n), np.nan)
-        for r, xs in enumerate(rows):
-            x0[r, :len(xs)] = xs
-        valid = ~np.isnan(x0)
-        x0 = np.where(valid, x0, 0.0)
-        p = ps[:, None]
-        s = np.zeros_like(x0)
+        valid = np.arange(n)[None, :] < lens[:, None]
+        while len(core) < K:
+            a = x0 + len(core) * p
+            core.append(mean(a + 0.15 * p, a + 0.85 * p))
+            edge.append(mean(a - 0.08 * p, a + 0.08 * p))
+        if left is None:
+            left = mean(x0 - p, x0)
+        xv = x0[:, :n]
+        s = np.zeros_like(xv)
         for k, kind in enumerate(cells):
-            a = x0 + k * p
-            core = mean(a + 0.15 * p, a + 0.85 * p)
-            s += core if kind == "G" else -2.0 * core
-            s -= 0.5 * mean(a - 0.08 * p, a + 0.08 * p)
-        s -= 2.0 * (mean(x0 - p, x0) + mean(x0 + K * p, x0 + (K + 1) * p))
+            s += core[k][:, :n] if kind == "G" else -2.0 * core[k][:, :n]
+            s -= 0.5 * edge[k][:, :n]
+        s -= 2.0 * (left[:, :n] + mean(xv + K * p, xv + (K + 1) * p))
         s /= K
         s[~valid] = -np.inf
         r, i = np.unravel_index(int(np.argmax(s)), s.shape)
@@ -259,7 +290,8 @@ class PreparedCrop:
     for any template, with the work shared between templates done once and
     cached - the ink maps; per orientation the deskew angle per angle search
     (+/-8, +/-30 deg; a search that lands on an angle already seen shares
-    everything after it); per angle the line bands per number of lines; per
+    everything after it) and the sharpness per angle tried (the two searches
+    overlap); per angle the line bands per number of lines; per
     band the cell grid per (template line, line 1's pitch) and its cells.
     Same results as segment() / cells_from() on the crop's ink maps.
 
@@ -276,6 +308,7 @@ class PreparedCrop:
         self.timings_ms = {}
         self._ink = None
         self._fit_ink, self._angles, self._rotated, self._bands, self._grids, self._cells = {}, {}, {}, {}, {}, {}
+        self._sharpness = {}                            # per orientation: deskew angle -> sharpness
 
     def _timed(self, step, fn, *a, **k):
         if self.deadline is not None and time.perf_counter() > self.deadline:
@@ -310,7 +343,8 @@ class PreparedCrop:
             raw = self.ink()[1]
             self._fit_ink[flip] = raw[::-1, ::-1].copy() if flip else raw
         if (flip, first_deg) not in self._angles:
-            self._angles[(flip, first_deg)] = self._timed("deskew", _deskew, self._fit_ink[flip], first_deg=first_deg)
+            self._angles[(flip, first_deg)] = self._timed("deskew", _deskew, self._fit_ink[flip], first_deg=first_deg,
+                                                          cache=self._sharpness.setdefault(flip, {}))
         ang = self._angles[(flip, first_deg)]
         f = self._rot("raw", flip, ang)
         score, bands = self._lines(flip, ang, len(template))
