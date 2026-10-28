@@ -81,15 +81,23 @@ class _FakeReader:
         return self.result
 
 
+def _print_found(e):
+    """The locator found a print (these tests are about reading it): the
+    frame itself is the crop. Without a print OCRead is NOK no_text_detected
+    before the reader runs."""
+    e._prepare = lambda frame: (frame, None, {}, {"bbox": [0, 0, 1, 1]})
+    return e
+
+
 class OCReadFontModeTests(unittest.TestCase):
-    def _engine(self, result):
+    def _engine(self, result, print_found=True):
         from backend.detection.ocread import engine
 
         e = engine.OCRead()
         e.dynamic_roi_debug_dir = None
         e.validator = engine.CodeTemplate(TPL, value_pattern=r"^\d{4} ([01]\d|2[0-3]):[0-5]\d BB (0[1-9]|1[0-2])/\d{2}$")
         e.font_reader = _FakeReader(result)
-        return e
+        return _print_found(e) if print_found else e
 
     def _r(self, text, lit=-0.2, conf=0.99):
         l1, l2 = text[:10], text[11:]
@@ -125,7 +133,7 @@ class OCReadFontModeTests(unittest.TestCase):
         self.assertEqual(r["detections"], [])
 
     def test_no_print_on_the_frame_is_no_text_detected(self):
-        r = self._engine(None).read(np.full((480, 744, 3), 128, np.uint8))
+        r = self._engine(None, print_found=False).read(np.full((480, 744, 3), 128, np.uint8))
         self.assertEqual((r["failure_reason"], r["text"]), ("no_text_detected", ""))
 
     def test_digit_confidence_gate(self):
@@ -261,7 +269,7 @@ class OCReadFormatSelectionTests(unittest.TestCase):
         e.validators = [engine.CodeTemplate(f, value_pattern=VALUE_PATTERN) for f in formats]
         e.skipped_formats = [list(f) for f in skipped]
         e.font_reader = _PerFormatReader(results)
-        return e
+        return _print_found(e)
 
     def _frame(self):
         return np.full((480, 744, 3), 190, np.uint8)
@@ -458,6 +466,7 @@ class LetterOIsDigitZeroTests(unittest.TestCase):
             r"^\d{4} ([01]\d|2[0-3]):[0-5]\d( (BB|EXP|PROD) (0[1-9]|1[0-2])/\d{2})?$")) for f in DEFAULT_FORMATS]
         e.skipped_formats = []
         e.font_reader = _PerFormatReader({tuple(TPL_PROD): _res("6288 22:00", "PROD 10/26")})
+        _print_found(e)
         r = e.read(np.full((480, 744, 3), 190, np.uint8))
         self.assertEqual(r["text"], "6288 22:00 PROD 10/26")
         self.assertEqual(r["validation"]["format"], TPL_PROD)
@@ -572,6 +581,62 @@ class SharedFormatWorkTests(unittest.TestCase):
         for step in ("ink", "deskew", "band_fit", "cell_fit", "cells"):
             self.assertIn(step, read["step_ms"])
         self.assertTrue(all(t["ms"] > 0 for t in read["formats_tried"]))
+
+
+# -- no print found / time budget ---------------------------------------------------
+
+class OCReadNoPrintAndTimeBudgetTests(unittest.TestCase):
+    def _engine(self, results=None, **cfg_overrides):
+        from backend.detection.ocread import engine
+        e = engine.OCRead()
+        e.dynamic_roi_debug_dir = None
+        e.validators = [engine.CodeTemplate(TPL, value_pattern=VALUE_PATTERN)]
+        e.skipped_formats = []
+        for k, v in cfg_overrides.items():
+            setattr(e, k, v)
+        if results is not None:
+            e.font_reader = _PerFormatReader(results)
+        return e
+
+    def test_no_print_found_is_nok_without_reading(self):
+        e = self._engine({tuple(TPL): _res("6274 10:29", "BB 05/28")})
+        r = e.read(np.full((480, 744, 3), 190, np.uint8))      # the locator finds nothing here
+        self.assertEqual((r["failure_reason"], r["text"]), ("no_text_detected", ""))
+        self.assertEqual(e.font_reader.calls, [], "the full frame must not be read")
+
+    def test_without_dynamic_roi_the_full_frame_is_still_read(self):
+        e = self._engine({tuple(TPL): _res("6274 10:29", "BB 05/28")}, dynamic_roi_enabled=False)
+        r = e.read(np.full((480, 744, 3), 190, np.uint8))
+        self.assertEqual(r["text"], "6274 10:29 BB 05/28")
+
+    def test_default_time_budget(self):
+        self.assertEqual(self._engine().time_budget_ms, 1500.0)
+
+    def test_used_up_time_budget_is_nok_timeout_without_a_code(self):
+        from backend.core import vision
+        e = _print_found(self._engine(time_budget_ms=0.001))
+        crop = cv2.imread(str(FIX / "4113_rib_through_6.png"))
+        e._prepare = lambda frame: (crop, None, {}, {"bbox": [0, 0, 1, 1]})
+        r = e.read(np.zeros((8, 8, 3), np.uint8))
+        self.assertEqual((r["failure_reason"], r["text"], r["detections"]), ("timeout", "", []))
+        read = r["validation"]["reads"][0]
+        self.assertFalse(read["accepted"])
+        self.assertTrue(read["formats_tried"][-1]["timeout"])
+        n = vision._normalize_result(r)
+        self.assertEqual((n["status"], n["failure_reason"], n["text"]), ("NOK", "timeout", ""))
+
+    def test_no_budget_reads_normally(self):
+        e = self._engine(time_budget_ms=0.0)
+        crop = cv2.imread(str(FIX / "4113_rib_through_6.png"))
+        e._prepare = lambda frame: (crop, None, {}, {"bbox": [0, 0, 1, 1]})
+        self.assertEqual(e.read(np.zeros((8, 8, 3), np.uint8))["text"], "4113 08:26 BB 05/26")
+
+    def test_prepared_crop_stops_after_its_deadline(self):
+        import time
+        from backend.detection.ocr.font_reader import PreparedCrop, ReadTimeout
+        prep = PreparedCrop(cv2.imread(str(FIX / "4113_rib_through_6.png")), deadline=time.perf_counter() - 1)
+        with self.assertRaises(ReadTimeout):
+            FontReader().read(prep, TPL)
 
 
 if __name__ == "__main__":

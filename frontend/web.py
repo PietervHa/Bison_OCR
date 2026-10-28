@@ -1,3 +1,4 @@
+import anyio
 import cv2
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,7 +6,10 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from backend.core.config_loader import cfg
+from backend.utils.logger import get_logger
 import time
+
+log = get_logger(__name__)
 
 
 def create_app(camera, app_state, start_cycle=None) -> FastAPI:
@@ -27,48 +31,58 @@ def create_app(camera, app_state, start_cycle=None) -> FastAPI:
     JPEG_QUALITY = int(cfg.get("hmi", {}).get("stream_quality", 75))
 
 
-    def generate_frames():
-        if not cfg["hmi"]["enable_video_feed"]:
-            import numpy as np
-            blank = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(blank, "Video feed disabled", (150, 240),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            # quality applies to the disabled-feed placeholder too
-            _, buffer = cv2.imencode(".jpg", blank,
-                                     [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    # 15 fps is plenty for the HMI preview and halves the encode work of 30.
+    STREAM_FPS = float(cfg.get("hmi", {}).get("stream_fps", 15))
+    FRAME_INTERVAL_S = 1.0 / STREAM_FPS
+    open_streams = [0]  # mutated only on the event loop thread
+
+    def _encode(frame):
+        # encode with configured quality instead of OpenCV default (95)
+        _, buffer = cv2.imencode(".jpg", frame,
+                                 [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        return (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + buffer.tobytes()
+            + b"\r\n"
+        )
+
+    def _grab_and_encode():
+        frame = camera.get_frame()
+        return None if frame is None else _encode(frame)
+
+    async def generate_frames(client):
+        # Async generator: on client disconnect Starlette cancels the response
+        # task, which raises CancelledError at one of the awaits below, so the
+        # stream ends right away. The sleeps run on the event loop instead of
+        # holding a threadpool worker; only the grab+encode uses a thread.
+        open_streams[0] += 1
+        log.info("video_feed opened (%s), open streams: %d", client, open_streams[0])
+        try:
+            if not cfg["hmi"]["enable_video_feed"]:
+                import numpy as np
+                blank = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(blank, "Video feed disabled", (150, 240),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                # quality applies to the disabled-feed placeholder too
+                chunk = _encode(blank)
+                while True:
+                    yield chunk
+                    await anyio.sleep(1)
+
             while True:
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n"
-                    + buffer.tobytes()
-                    + b"\r\n"
-                )
-                time.sleep(1)
-
-        FRAME_INTERVAL_MS = 33.33
-
-        while True:
-            frame_start = time.time()
-
-            frame = camera.get_frame()
-            if frame is None:
-                time.sleep(0.01)
-                continue
-
-            # encode with configured quality instead of OpenCV default (95)
-            _, buffer = cv2.imencode(".jpg", frame,
-                                     [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n"
-                + buffer.tobytes()
-                + b"\r\n"
-            )
-
-            elapsed_ms = (time.time() - frame_start) * 1000
-            remaining_ms = FRAME_INTERVAL_MS - elapsed_ms
-            if remaining_ms > 0:
-                time.sleep(remaining_ms / 1000)
+                frame_start = time.perf_counter()
+                chunk = await anyio.to_thread.run_sync(_grab_and_encode)
+                if chunk is None:
+                    await anyio.sleep(0.01)
+                    continue
+                yield chunk
+                remaining = FRAME_INTERVAL_S - (time.perf_counter() - frame_start)
+                if remaining > 0:
+                    await anyio.sleep(remaining)
+        finally:
+            open_streams[0] -= 1
+            log.info("video_feed closed (%s), open streams: %d", client, open_streams[0])
 
     # Applied to the index page and the /status auth check so that no
     # browser, proxy, or embedded kiosk webview caches a response that
@@ -104,9 +118,10 @@ def create_app(camera, app_state, start_cycle=None) -> FastAPI:
         return {"camera_rotation": app_state.get_camera_rotation()}
 
     @app.get("/video_feed")
-    def video_feed():
+    def video_feed(request: Request):
+        client = f"{request.client.host}:{request.client.port}" if request.client else "?"
         return StreamingResponse(
-            generate_frames(),
+            generate_frames(client),
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
 

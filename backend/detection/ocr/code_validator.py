@@ -68,6 +68,7 @@ REJECT_NO_TEXT = "no_text_detected"
 REJECT_FORMAT = "format_mismatch"
 REJECT_CONFIDENCE = "low_confidence"
 REJECT_VALUE = "invalid_value"
+REJECT_TIMEOUT = "timeout"
 
 
 def normalize_token(text: str) -> str:

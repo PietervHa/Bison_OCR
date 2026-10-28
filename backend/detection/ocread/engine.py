@@ -35,8 +35,9 @@ from pathlib import Path
 import cv2
 
 from backend.core.config_loader import cfg
-from backend.detection.ocr.code_validator import CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE
-from backend.detection.ocr.font_reader import FontReader, PreparedCrop
+from backend.detection.ocr.code_validator import (CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE, REJECT_NO_TEXT,
+                                                  REJECT_TIMEOUT)
+from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
 from backend.detection.ocr.text_locator import locate_text_region, deskew_crop
 from backend.utils.logger import get_logger
 
@@ -85,6 +86,10 @@ class OCRead:
         # reason instead of forwarding a guess to the PLC.
         val_cfg = ocr_cfg.get("read_validation") if isinstance(ocr_cfg.get("read_validation"), dict) else {}
         self.validators = CodeTemplate.list_from_config(val_cfg)
+        # Safety net: a read still running after this many ms (from the
+        # start of read(), incl. locating the print) stops and is NOK
+        # "timeout" - never a code. 0 = no limit.
+        self.time_budget_ms = float(val_cfg.get("time_budget_ms", 1500) or 0)
         self.skipped_formats = []
         self._last_located = None
 
@@ -134,7 +139,7 @@ class OCRead:
     def _read_formats(self):
         return [v for v in self.validators if v.lines not in self.skipped_formats]
 
-    def _read_all_formats(self, crop):
+    def _read_all_formats(self, crop, deadline=None):
         """Read the crop once per supported format and pick one.
 
         Returns (validator, read, attempts, step_ms): the trusted read of the
@@ -145,16 +150,25 @@ class OCRead:
         band_fit, cell_fit, cells); attempts carry each format's own time.
 
         All formats share one PreparedCrop: what they have in common is
-        computed by the first format that needs it, the others reuse it."""
+        computed by the first format that needs it, the others reuse it.
+        deadline (time.perf_counter()): past it, ReadTimeout is raised, with
+        the attempts and step_ms so far as its .attempts / .step_ms."""
         reads, attempts = [], []
-        prep = PreparedCrop(crop)
+        prep = PreparedCrop(crop, deadline)
         # More lines first: once a format is trusted, formats with fewer lines
         # can no longer win and are not read (saves a read per cycle).
         for v in sorted(self._read_formats(), key=lambda v: -len(v.lines)):
             if any(t and len(x.lines) > len(v.lines) for x, _, t in reads):
                 break
             ts = time.perf_counter()
-            r = self.font_reader.read(prep, v.lines)
+            try:
+                r = self.font_reader.read(prep, v.lines)
+            except ReadTimeout as exc:
+                attempts.append({"format": v.lines, "trusted": False, "literal_score": None,
+                                 "min_token_confidence": None, "ms": round((time.perf_counter() - ts) * 1000, 1),
+                                 "timeout": True})
+                exc.attempts, exc.step_ms = attempts, prep.timings_ms
+                raise
             ms = round((time.perf_counter() - ts) * 1000, 1)
             if r is not None and len(r["lines"]) != len(v.lines):
                 r = None
@@ -270,7 +284,12 @@ class OCRead:
         pass for the chosen format; "text" is then the canonical code, e.g.
         "4113 08:26 BB 05/26" or "6286 16:24".
         Otherwise failure_reason is format_mismatch / low_confidence /
-        invalid_value / no_text_detected and "text" is empty.
+        invalid_value / no_text_detected / timeout and "text" is empty.
+
+        no_text_detected straight away when the locator (dynamic ROI) found
+        no print: reading the full frame instead took 1.2-1.7 s and never
+        gave a code (22 of the 514 test images). timeout: the read was still
+        running after ocr.read_validation.time_budget_ms.
         """
         if self.font_reader is None:
             return {
@@ -283,9 +302,19 @@ class OCRead:
 
         t0 = time.perf_counter()
         crop, cycle_debug_dir, profile_data, located = self._prepare(frame)
-        validator, r, attempts, step_ms = self._read_all_formats(crop)
+        validator, r, attempts, step_ms, reason = None, None, [], {}, None
+        if located is None and self.dynamic_roi_enabled:
+            reason = REJECT_NO_TEXT            # no print found: nothing to read
+        else:
+            deadline = t0 + self.time_budget_ms / 1000.0 if self.time_budget_ms > 0 else None
+            try:
+                validator, r, attempts, step_ms = self._read_all_formats(crop, deadline)
+            except ReadTimeout as exc:
+                attempts, step_ms, reason = exc.attempts, exc.step_ms, REJECT_TIMEOUT
         elapsed = (time.perf_counter() - t0) * 1000.0
-        if r is None:
+        if reason is not None:
+            candidates, verdict = [], None
+        elif r is None:
             reason, candidates, verdict = REJECT_FORMAT, [], None
         else:
             candidates = [{"text": line, "confidence": r["confidence"]} for line in r["lines"]]

@@ -27,6 +27,10 @@ ocr:
   # this spacing). If the font reader can't be loaded or supports none of
   # the templates, every read is NOK with failure_reason ocr_engine_error.
   read_validation:
+    # Safety net: a read still running after this many ms (incl. locating
+    # the print) stops and is NOK with failure_reason "timeout", never a
+    # code. On the 514 test images the slowest read is ~1.2 s. 0 = no limit.
+    time_budget_ms: 1500
     font_reader:
       model: ''                   # '' = backend/detection/ocr/models/font_reader.npz
       # To check on the line that it READS rather than recalls known codes:

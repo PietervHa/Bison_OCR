@@ -214,8 +214,9 @@ async function stepTestImage(direction) {
     try {
         const res = await fetch(`/test_images/${direction}`, { method: "POST" });
         if (res.ok) {
+            // No reloadCameraFeed(): the open stream already shows the new
+            // image, and each reload opened another /video_feed connection.
             showTestImageInfo(await res.json());
-            reloadCameraFeed();
         }
     } catch (e) {
         console.error("Failed to step test image:", e);

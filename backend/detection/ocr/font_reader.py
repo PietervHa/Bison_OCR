@@ -250,6 +250,10 @@ def cells_from(boosted, seg, flip):
     return [cell for band, line in zip(seg["bands"], seg["lines"]) for cell in _cut_cells(b, band, line)]
 
 
+class ReadTimeout(Exception):
+    """A PreparedCrop's deadline passed before a step could start."""
+
+
 class PreparedCrop:
     """One crop, read with several templates: segment() and cells_from()
     for any template, with the work shared between templates done once and
@@ -260,15 +264,22 @@ class PreparedCrop:
     Same results as segment() / cells_from() on the crop's ink maps.
 
     timings_ms: time per step summed over all reads of this crop (ink,
-    deskew, band_fit, cell_fit, cells)."""
+    deskew, band_fit, cell_fit, cells).
+    deadline: time.perf_counter() value; a step that would start after it
+    raises ReadTimeout instead (None = no limit). Checked before each step,
+    so a read stops at most one step late (the longest, a grid fit, takes
+    ~50-150 ms)."""
 
-    def __init__(self, crop):
+    def __init__(self, crop, deadline=None):
         self.crop = crop
+        self.deadline = deadline
         self.timings_ms = {}
         self._ink = None
         self._fit_ink, self._angles, self._rotated, self._bands, self._grids, self._cells = {}, {}, {}, {}, {}, {}
 
     def _timed(self, step, fn, *a, **k):
+        if self.deadline is not None and time.perf_counter() > self.deadline:
+            raise ReadTimeout(f"time budget used up before {step}")
         t = time.perf_counter()
         out = fn(*a, **k)
         self.timings_ms[step] = round(self.timings_ms.get(step, 0.0) + (time.perf_counter() - t) * 1000, 1)

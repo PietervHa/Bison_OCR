@@ -6,7 +6,9 @@ management, vision processing, the TCP trigger server for PLC integration,
 and the web interface.
 """
 
+import sys
 import threading
+import traceback
 import keyboard
 import uvicorn
 from pathlib import Path
@@ -77,6 +79,31 @@ def _process_vision_result(result, trigger_time, app_state):
     except Exception as exc:
         log.error("Failed to process vision result: %s", exc)
 
+def _start_stall_watchdog(cycle_done, trigger_time):
+    """Log the stack of every thread while a cycle is still running after
+    debug.stall_dump_ms, and again at each further multiple (max 3 dumps),
+    to show where a stalled cycle is stuck. 0 disables it."""
+    interval_s = float(cfg.get("debug", {}).get("stall_dump_ms", 2000)) / 1000.0
+    if interval_s <= 0:
+        return
+
+    def _watch():
+        for _ in range(3):
+            if cycle_done.wait(interval_s):
+                return
+            elapsed_ms = (time.perf_counter() - trigger_time) * 1000
+            names = {t.ident: t.name for t in threading.enumerate()}
+            parts = [f"STALL: cycle still running after {elapsed_ms:.0f} ms; thread stacks:"]
+            for ident, frame in sys._current_frames().items():
+                if ident == threading.get_ident():
+                    continue
+                parts.append(f"--- thread {names.get(ident, '?')} ({ident})")
+                parts.append("".join(traceback.format_stack(frame)).rstrip())
+            log.warning("\n".join(parts))
+
+    threading.Thread(target=_watch, name="stall-watchdog", daemon=True).start()
+
+
 def start_vision_cycle(camera, app_state) -> bool:
     """Grab a frame and start one vision cycle in the background.
     Returns False when a cycle is already running."""
@@ -89,16 +116,21 @@ def start_vision_cycle(camera, app_state) -> bool:
     # Track trigger time for cycle time measurement
     trigger_time = time.perf_counter()
 
+    cycle_done = threading.Event()
+    _start_stall_watchdog(cycle_done, trigger_time)
+
     def _callback(result):
         try:
             _process_vision_result(result, trigger_time, app_state)
         finally:
+            cycle_done.set()
             _vision_busy.clear()
 
     _vision_busy.set()
     try:
         run_vision(frame, callback=_callback)  # background thread, calls _callback
     except Exception:
+        cycle_done.set()
         _vision_busy.clear()
         raise
     log.debug("Vision processing started (non-blocking)")
