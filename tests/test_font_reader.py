@@ -463,5 +463,116 @@ class LetterOIsDigitZeroTests(unittest.TestCase):
         self.assertEqual(r["validation"]["format"], TPL_PROD)
 
 
+# -- shared work between formats (PreparedCrop) and the vectorised grid fit -----
+
+def _fit_cells_per_pitch(fit, band, template_line, near_pitch=None):
+    """_fit_cells() as it was before the pitches were vectorised: one pitch
+    at a time. Reference for the vectorised version (must be identical)."""
+    from backend.detection.ocr.font_reader import LINE_PITCH_TOLERANCE, PITCH_RANGE, _layouts
+    y0, y1 = band; h = max(1, y1 - y0)
+    p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
+    if near_pitch:
+        p_lo = max(p_lo, near_pitch / LINE_PITCH_TOLERANCE)
+        p_hi = min(p_hi, near_pitch * LINE_PITCH_TOLERANCE)
+        if p_lo >= p_hi:
+            p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
+    col = fit[y0:y1].sum(axis=0) / h; W = len(col)
+    cs = np.r_[0.0, np.cumsum(col)]
+
+    def mean(a, b):
+        a = np.clip(np.round(a).astype(int), 0, W); b = np.clip(np.round(b).astype(int), 0, W)
+        return np.where(b > a, (cs[b] - cs[a]) / np.maximum(1, b - a), 0.0)
+
+    best = (-1e18, None)
+    for cells, labels in _layouts(template_line):
+        K = len(cells)
+        for p in np.arange(p_lo, p_hi, 0.25):
+            x0 = np.arange(-0.5 * p, W - K * p * 0.8, 0.5)
+            if len(x0) == 0:
+                continue
+            s = np.zeros_like(x0)
+            for k, kind in enumerate(cells):
+                a = x0 + k * p
+                core = mean(a + 0.15 * p, a + 0.85 * p)
+                s += core if kind == "G" else -2.0 * core
+                s -= 0.5 * mean(a - 0.08 * p, a + 0.08 * p)
+            s -= 2.0 * (mean(x0 - p, x0) + mean(x0 + K * p, x0 + (K + 1) * p))
+            s /= K
+            i = int(np.argmax(s))
+            if s[i] > best[0]:
+                best = (float(s[i]), (labels, [(float(x0[i] + k * p), float(x0[i] + (k + 1) * p)) for k in range(K)]))
+    return best
+
+
+class SharedFormatWorkTests(unittest.TestCase):
+    """Several formats on one crop share the format-independent work; the
+    results must be exactly those of each format read on its own."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reader = FontReader(min_literal_score=-1.0)
+        cls.formats = [f for f in DEFAULT_FORMATS if cls.reader.supports(f)]
+
+    def _crops(self):
+        for name in ("4113_rib_through_6.png", "3030_crossing_ribs.png", "4113_upside_down.png"):
+            yield name, cv2.imread(str(FIX / name))
+        yield "single line", _line1_crop("3030_crossing_ribs.png", 82)
+
+    def test_prepared_crop_reads_like_each_format_on_its_own(self):
+        from backend.detection.ocr.font_reader import PreparedCrop
+        strip = lambda r: r and {k: v for k, v in r.items() if k != "timings_ms"}
+        for name, crop in self._crops():
+            prep = PreparedCrop(crop)
+            for f in self.formats:
+                with self.subTest(crop=name, format=f):
+                    self.assertEqual(strip(self.reader.read(prep, f)), strip(self.reader.read(crop, f)))
+            self.assertGreater(prep.timings_ms["cell_fit"], 0)
+
+    def test_line_1_grid_is_fitted_once_for_all_formats(self):
+        from backend.detection.ocr import font_reader
+        from backend.detection.ocr.font_reader import PreparedCrop
+        prep = PreparedCrop(cv2.imread(str(FIX / "4113_rib_through_6.png")))
+        calls = []
+        real = font_reader._fit_cells
+        with mock.patch.object(font_reader, "_fit_cells", lambda *a: calls.append(a[2]) or real(*a)):
+            for f in self.formats:
+                prep.segment(f, False)
+        self.assertEqual(calls.count("#### ##:##"), 2)     # once on 2 bands, once on 1 band
+        self.assertEqual(len(calls), 2 + len([f for f in self.formats if len(f) == 2]))
+
+    def test_vectorised_grid_fit_matches_the_per_pitch_loop(self):
+        from backend.detection.ocr.font_reader import _fit_cells, _fit_lines, ink_maps, line_pitch
+        rng = np.random.default_rng(0)
+        cases = []
+        for name, crop in self._crops():
+            raw = ink_maps(crop)[1]
+            _, bands = _fit_lines(raw, 2)
+            l1 = _fit_cells_per_pitch(raw, bands[0], "#### ##:##")
+            cases += [(raw, bands[0], "#### ##:##", None)] + [
+                (raw, bands[1], f[1], line_pitch(l1)) for f in self.formats if len(f) == 2]
+        for _ in range(10):                                 # random ink, odd sizes and pitch hints
+            H, W = int(rng.integers(20, 120)), int(rng.integers(10, 400))
+            y0 = int(rng.integers(0, H - 5))
+            cases.append((rng.random((H, W)).astype(np.float32), (y0, int(min(H, y0 + rng.integers(1, 40)))),
+                          "BB ##/##", None if rng.random() < 0.5 else float(rng.uniform(5, 40))))
+        for fit, band, tl, near in cases:
+            with self.subTest(band=band, line=tl, near=near):
+                self.assertEqual(_fit_cells(fit, band, tl, near), _fit_cells_per_pitch(fit, band, tl, near))
+
+    def test_engine_reports_time_per_step_and_per_format(self):
+        from backend.detection.ocread import engine
+        val_cfg = {"templates": ALL_FORMATS, "value_pattern": VALUE_PATTERN, "font_reader": {"model": ""}}
+        with mock.patch.dict(engine.cfg["ocr"], {"read_validation": val_cfg}):
+            e = engine.OCRead()
+        e.dynamic_roi_debug_dir = None
+        crop = cv2.imread(str(FIX / "4113_rib_through_6.png"))
+        e._prepare = lambda frame: (crop, None, {"roi_ms": 12.0}, {"bbox": [0, 0, 1, 1]})
+        read = e.read(np.zeros((8, 8, 3), np.uint8))["validation"]["reads"][0]
+        self.assertEqual(read["step_ms"]["locate"], 12.0)
+        for step in ("ink", "deskew", "band_fit", "cell_fit", "cells"):
+            self.assertIn(step, read["step_ms"])
+        self.assertTrue(all(t["ms"] > 0 for t in read["formats_tried"]))
+
+
 if __name__ == "__main__":
     unittest.main()

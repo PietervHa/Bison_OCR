@@ -34,6 +34,13 @@ Pipeline, per deskewed crop from the text locator:
      garbled cut or wrong orientation fails this) and every digit is
      confident enough.
 
+Several formats on one crop (OCRead reads every configured format): pass
+a PreparedCrop to read() and the work that doesn't depend on the format is
+done once - ink map, deskew angle per orientation and angle search, line
+bands per line count, and each line's cell grid and cells (line 1
+"#### ##:##" is the same in every format); per format only its own line 2
+grid is fitted. The results are identical to reading each format on its own.
+
 Supports templates of one or two lines made of '#' digit positions,
 spaces and literals the model knows (B : / with the current model; a
 literal O is scored with the 0 class, see LITERAL_CLASS; e.g.
@@ -154,24 +161,38 @@ def _fit_cells(fit, band, template_line, near_pitch=None):
         a = np.clip(np.round(a).astype(int), 0, W); b = np.clip(np.round(b).astype(int), 0, W)
         return np.where(b > a, (cs[b] - cs[a]) / np.maximum(1, b - a), 0.0)
 
+    # All pitches at once: row r = pitch ps[r], column j = offset x0 (each
+    # pitch has its own offsets, padded with NaN). The score per (pitch,
+    # offset) is computed element by element exactly as one pitch at a time,
+    # and the first maximum in (layout, pitch, offset) order wins - the same
+    # grid as the per-pitch loop, ~3x faster.
+    ps = np.arange(p_lo, p_hi, 0.25)
     best = (-1e18, None)
     for cells, labels in _layouts(template_line):
         K = len(cells)
-        for p in np.arange(p_lo, p_hi, 0.25):
-            x0 = np.arange(-0.5 * p, W - K * p * 0.8, 0.5)
-            if len(x0) == 0:
-                continue
-            s = np.zeros_like(x0)
-            for k, kind in enumerate(cells):
-                a = x0 + k * p
-                core = mean(a + 0.15 * p, a + 0.85 * p)
-                s += core if kind == "G" else -2.0 * core
-                s -= 0.5 * mean(a - 0.08 * p, a + 0.08 * p)
-            s -= 2.0 * (mean(x0 - p, x0) + mean(x0 + K * p, x0 + (K + 1) * p))
-            s /= K
-            i = int(np.argmax(s))
-            if s[i] > best[0]:
-                best = (float(s[i]), (labels, [(float(x0[i] + k * p), float(x0[i] + (k + 1) * p)) for k in range(K)]))
+        rows = [np.arange(-0.5 * p, W - K * p * 0.8, 0.5) for p in ps]
+        n = max((len(r) for r in rows), default=0)
+        if n == 0:
+            continue
+        x0 = np.full((len(ps), n), np.nan)
+        for r, xs in enumerate(rows):
+            x0[r, :len(xs)] = xs
+        valid = ~np.isnan(x0)
+        x0 = np.where(valid, x0, 0.0)
+        p = ps[:, None]
+        s = np.zeros_like(x0)
+        for k, kind in enumerate(cells):
+            a = x0 + k * p
+            core = mean(a + 0.15 * p, a + 0.85 * p)
+            s += core if kind == "G" else -2.0 * core
+            s -= 0.5 * mean(a - 0.08 * p, a + 0.08 * p)
+        s -= 2.0 * (mean(x0 - p, x0) + mean(x0 + K * p, x0 + (K + 1) * p))
+        s /= K
+        s[~valid] = -np.inf
+        r, i = np.unravel_index(int(np.argmax(s)), s.shape)
+        if s[r, i] > best[0]:
+            pr, xr = ps[r], x0[r, i]
+            best = (float(s[r, i]), (labels, [(float(xr + k * pr), float(xr + (k + 1) * pr)) for k in range(K)]))
     return best
 
 
@@ -207,20 +228,103 @@ def segment(fit_ink, template, first_deg=8.0):
     return seg
 
 
+def _cut_cells(b, band, line):
+    """The classifier cells of one line: b the rotated boosted ink, band
+    (y0, y1), line (labels, [(x0, x1), ...]) from _fit_cells()."""
+    (y0, y1), (labels, cells) = band, line
+    out = []
+    for lab, (a, c) in zip(labels, cells):
+        if lab == " ":
+            continue
+        x0, x1 = int(round(a)), int(round(c))
+        pad_y = max(1, (y1 - y0) // 8)
+        cell = b[max(0, y0 - pad_y): y1 + pad_y, max(0, x0): max(x0 + 1, x1)]
+        out.append(cv2.resize(cell, (CELL_W, CELL_H), interpolation=cv2.INTER_AREA)
+                   if cell.size else np.zeros((CELL_H, CELL_W), np.float32))
+    return out
+
+
 def cells_from(boosted, seg, flip):
     b = boosted[::-1, ::-1] if flip else boosted
     b = _rotate(b, seg["angle"])
-    out = []
-    for (y0, y1), (labels, cells) in zip(seg["bands"], seg["lines"]):
-        for lab, (a, c) in zip(labels, cells):
-            if lab == " ":
-                continue
-            x0, x1 = int(round(a)), int(round(c))
-            pad_y = max(1, (y1 - y0) // 8)
-            cell = b[max(0, y0 - pad_y): y1 + pad_y, max(0, x0): max(x0 + 1, x1)]
-            out.append(cv2.resize(cell, (CELL_W, CELL_H), interpolation=cv2.INTER_AREA)
-                       if cell.size else np.zeros((CELL_H, CELL_W), np.float32))
-    return out
+    return [cell for band, line in zip(seg["bands"], seg["lines"]) for cell in _cut_cells(b, band, line)]
+
+
+class PreparedCrop:
+    """One crop, read with several templates: segment() and cells_from()
+    for any template, with the work shared between templates done once and
+    cached - the ink maps; per orientation the deskew angle per angle search
+    (+/-8, +/-30 deg; a search that lands on an angle already seen shares
+    everything after it); per angle the line bands per number of lines; per
+    band the cell grid per (template line, line 1's pitch) and its cells.
+    Same results as segment() / cells_from() on the crop's ink maps.
+
+    timings_ms: time per step summed over all reads of this crop (ink,
+    deskew, band_fit, cell_fit, cells)."""
+
+    def __init__(self, crop):
+        self.crop = crop
+        self.timings_ms = {}
+        self._ink = None
+        self._fit_ink, self._angles, self._rotated, self._bands, self._grids, self._cells = {}, {}, {}, {}, {}, {}
+
+    def _timed(self, step, fn, *a, **k):
+        t = time.perf_counter()
+        out = fn(*a, **k)
+        self.timings_ms[step] = round(self.timings_ms.get(step, 0.0) + (time.perf_counter() - t) * 1000, 1)
+        return out
+
+    def ink(self):
+        """(boosted, raw) from ink_maps(), computed on first use."""
+        if self._ink is None:
+            self._ink = self._timed("ink", ink_maps, self.crop)
+        return self._ink
+
+    def _rot(self, which, flip, ang):
+        key = (which, flip, ang)
+        if key not in self._rotated:
+            img = self.ink()[0 if which == "boosted" else 1]
+            self._rotated[key] = _rotate(img[::-1, ::-1] if flip else img, ang)
+        return self._rotated[key]
+
+    def _lines(self, flip, ang, n_lines):
+        key = (flip, ang, n_lines)
+        if key not in self._bands:
+            self._bands[key] = self._timed("band_fit", _fit_lines, self._rot("raw", flip, ang), n_lines)
+        return self._bands[key]
+
+    def segment(self, template, flip, first_deg=8.0):
+        """segment() of the crop's fit ink, flipped 180 degrees or not."""
+        if flip not in self._fit_ink:
+            raw = self.ink()[1]
+            self._fit_ink[flip] = raw[::-1, ::-1].copy() if flip else raw
+        if (flip, first_deg) not in self._angles:
+            self._angles[(flip, first_deg)] = self._timed("deskew", _deskew, self._fit_ink[flip], first_deg=first_deg)
+        ang = self._angles[(flip, first_deg)]
+        f = self._rot("raw", flip, ang)
+        score, bands = self._lines(flip, ang, len(template))
+        fits = []
+        for band, tl in zip(bands, template):
+            key = (flip, ang, band, tl, line_pitch(fits[0]) if fits else None)
+            if key not in self._grids:
+                self._grids[key] = self._timed("cell_fit", _fit_cells, f, band, tl, key[-1])
+            fits.append(self._grids[key])
+        seg = {"angle": ang, "bands": bands, "lines": [g for _, g in fits],
+               "line_fit": [s for s, _ in fits], "second_line": False}
+        if len(template) == 1:
+            seg["second_line"] = self._lines(flip, ang, 2)[0] > SECOND_LINE_RATIO * score
+        return seg
+
+    def cells(self, seg, flip):
+        """cells_from() for a seg from segment(): each line's cells cut once."""
+        out = []
+        for band, line in zip(seg["bands"], seg["lines"]):
+            key = (flip, seg["angle"], band, tuple(line[0]), tuple(line[1]))
+            if key not in self._cells:
+                self._cells[key] = self._timed("cells", _cut_cells, self._rot("boosted", flip, seg["angle"]),
+                                               band, line)
+            out += self._cells[key]
+        return out
 
 
 # -- classifier -----------------------------------------------------------------
@@ -268,14 +372,18 @@ class FontReader:
     def read(self, crop, template):
         """Returns dict(lines, text, literal_score, confidence, flipped, angle, trusted) or None.
 
+        crop: the image, or a PreparedCrop of it to share the work between
+        several templates read on the same crop (same results).
         None also when a one-line template is read on a crop that holds two
         lines: that would be line 1 with line 2 ignored, not a reading."""
-        if crop is None or crop.size == 0 or not self.supports(template) or len(template) not in (1, 2):
+        prep = crop if isinstance(crop, PreparedCrop) else PreparedCrop(crop)
+        if (prep.crop is None or prep.crop.size == 0 or not self.supports(template)
+                or len(template) not in (1, 2)):
             return None
         t0 = time.perf_counter()
         timings = {}
-        boosted, raw = ink_maps(crop)
-        timings["ink_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        prep.ink()
+        timings["ink_ms"] = round((time.perf_counter() - t0) * 1000, 1)   # 0 once the crop's ink is shared
         n_pos = sum(1 for line in template for ch in line if ch != " ")
         best = None
         for flip in (False, True):
@@ -283,15 +391,14 @@ class FontReader:
                     and best["literal_score"] >= self.early_exit_literal):
                 break                                   # upright read is clearly right
             ts = time.perf_counter()
-            fit = raw[::-1, ::-1].copy() if flip else raw
             # Fast path: narrow angle search. If that read isn't clearly right,
             # redo it with the full +/-30 degree search (a wrong angle inside
             # the narrow range can otherwise win on a skewed crop).
             for first_deg in (8.0, 30.0):
-                seg = segment(fit, template, first_deg=first_deg)
+                seg = prep.segment(template, flip, first_deg=first_deg)
                 if seg["second_line"]:
                     return None                         # two lines; orientation doesn't change that
-                cells = cells_from(boosted, seg, flip)
+                cells = prep.cells(seg, flip)
                 if len(cells) != n_pos:
                     continue
                 tp = time.perf_counter()

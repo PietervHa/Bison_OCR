@@ -11,10 +11,13 @@ Reads the dot-printed code on a bottle cap:
 Several print formats can be configured (ocr.read_validation.templates),
 e.g. "#### ##:##" / "BB ##/##", "#### ##:##" / "EXP ##/##" and the single
 line "#### ##:##". Every format the model supports is read on the same
-crop. Of the trusted reads (the font reader's own gates pass), the format
-with more lines wins, then the higher literal score: a two-line print is
-never accepted as the single-line format with line 2 ignored. The chosen
-format is in validation["format"].
+crop, with the work they share (ink map, deskew, line bands, line 1's grid
+and cells) done once per frame (font_reader.PreparedCrop). Of the trusted
+reads (the font reader's own gates pass), the format with more lines wins,
+then the higher literal score: a two-line print is never accepted as the
+single-line format with line 2 ignored. The chosen format is in
+validation["format"]; validation["reads"][0] has the time per step
+("step_ms") and per format tried ("formats_tried"[i]["ms"]).
 
 The result is a dict with the keys downstream code relies on: detections,
 text, processing_time_ms, mode="ocread", validation and - for a rejected
@@ -33,7 +36,7 @@ import cv2
 
 from backend.core.config_loader import cfg
 from backend.detection.ocr.code_validator import CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE
-from backend.detection.ocr.font_reader import FontReader
+from backend.detection.ocr.font_reader import FontReader, PreparedCrop
 from backend.detection.ocr.text_locator import locate_text_region, deskew_crop
 from backend.utils.logger import get_logger
 
@@ -134,34 +137,42 @@ class OCRead:
     def _read_all_formats(self, crop):
         """Read the crop once per supported format and pick one.
 
-        Returns (validator, read, attempts): the trusted read of the format
-        with the most lines (then the highest literal score); with no trusted
-        read, the read with the highest literal score (for its reject reason);
-        (None, None, attempts) when nothing could be read at all."""
+        Returns (validator, read, attempts, step_ms): the trusted read of the
+        format with the most lines (then the highest literal score); with no
+        trusted read, the read with the highest literal score (for its reject
+        reason); (None, None, attempts, step_ms) when nothing could be read at
+        all. step_ms: time per font reader step over all formats (ink, deskew,
+        band_fit, cell_fit, cells); attempts carry each format's own time.
+
+        All formats share one PreparedCrop: what they have in common is
+        computed by the first format that needs it, the others reuse it."""
         reads, attempts = [], []
+        prep = PreparedCrop(crop)
         # More lines first: once a format is trusted, formats with fewer lines
         # can no longer win and are not read (saves a read per cycle).
         for v in sorted(self._read_formats(), key=lambda v: -len(v.lines)):
             if any(t and len(x.lines) > len(v.lines) for x, _, t in reads):
                 break
-            r = self.font_reader.read(crop, v.lines)
+            ts = time.perf_counter()
+            r = self.font_reader.read(prep, v.lines)
+            ms = round((time.perf_counter() - ts) * 1000, 1)
             if r is not None and len(r["lines"]) != len(v.lines):
                 r = None
             trusted = (r is not None and r["literal_score"] >= self.font_reader.min_literal_score
                        and r["confidence"] >= self.font_reader.min_digit_confidence)
             attempts.append({"format": v.lines, "trusted": trusted,
                              "literal_score": r["literal_score"] if r else None,
-                             "min_token_confidence": r["confidence"] if r else None})
+                             "min_token_confidence": r["confidence"] if r else None, "ms": ms})
             if r is not None:
                 reads.append((v, r, trusted))
         if not reads:
-            return None, None, attempts
+            return None, None, attempts, prep.timings_ms
         trusted = [x for x in reads if x[2]]
         if trusted:
             v, r, _ = max(trusted, key=lambda x: (len(x[0].lines), x[1]["literal_score"]))
         else:
             v, r, _ = max(reads, key=lambda x: x[1]["literal_score"])
-        return v, r, attempts
+        return v, r, attempts, prep.timings_ms
 
     def _downscale_roi(self, frame):
         if self.downscale >= 1.0:
@@ -272,7 +283,7 @@ class OCRead:
 
         t0 = time.perf_counter()
         crop, cycle_debug_dir, profile_data, located = self._prepare(frame)
-        validator, r, attempts = self._read_all_formats(crop)
+        validator, r, attempts, step_ms = self._read_all_formats(crop)
         elapsed = (time.perf_counter() - t0) * 1000.0
         if r is None:
             reason, candidates, verdict = REJECT_FORMAT, [], None
@@ -302,6 +313,8 @@ class OCRead:
                         "min_token_confidence": r["confidence"] if r else None,
                         "literal_score": r["literal_score"] if r else None,
                         "timings_ms": r.get("timings_ms") if r else None,
+                        # Per step over all formats, incl. locating the print.
+                        "step_ms": {"locate": round(profile_data.get("roi_ms", 0.0), 1), **step_ms},
                         "orientation": ("reversed" if r and r["flipped"] else "normal") if r else None,
                         "format": validator.lines if validator else None, "formats_tried": attempts}
         if cycle_debug_dir:

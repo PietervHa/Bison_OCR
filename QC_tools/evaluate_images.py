@@ -22,11 +22,14 @@ Reports, per format the engine read (for a NOK: the format of its closest
 rejected read, or "none") and in total: correct OK, WRONG OK, NOK with the
 reasons, and the average and maximum time per image (the engine's
 processing_time_ms: locate + read). The WRONG reads are listed with what was
-read and what was expected.
+read and what was expected. The JSON report (--report) also has every
+image's read (text, outcome, reason, literal score, digit confidence,
+formats tried), to compare two runs image by image.
 
 Usage (from the repo root):
     python -m QC_tools.evaluate_images data/test_images
     python -m QC_tools.evaluate_images data/test_images --date 05/28 --report eval.json
+    python -m QC_tools.evaluate_images data/test_images --first 100
 """
 from __future__ import annotations
 
@@ -98,6 +101,7 @@ def main(argv=None):
     ap.add_argument("--date", default="05/28",
                     help="date on line 2 of BB and EXP, e.g. 05/28 (PROD: month/year of the capture date)")
     ap.add_argument("--report", type=Path, default=None, help="also write the report as JSON")
+    ap.add_argument("--first", type=int, default=0, help="only the first N images (in file name order; 0 = all)")
     args = ap.parse_args(argv)
 
     from backend.core.config_loader import cfg
@@ -109,6 +113,8 @@ def main(argv=None):
     logging.disable(logging.WARNING)                    # not the engine's per-frame warnings
 
     files = sorted(p for p in args.images.rglob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
+    if args.first > 0:
+        files = files[:args.first]
     rows, skipped = [], Counter()
     for i, p in enumerate(files, 1):
         t = capture_time(p)
@@ -120,9 +126,12 @@ def main(argv=None):
         result = engine.read(img)
         expected = expected_texts(t, args.date, formats)
         kind, text, fmt = outcome(result, expected)
+        read = ((result.get("validation") or {}).get("reads") or [{}])[0]
         rows.append({"image": p.name, "outcome": kind, "format": fmt, "text": text,
                      "reason": result.get("failure_reason") or result.get("error"),
-                     "expected": sorted(expected), "ms": float(result.get("processing_time_ms") or 0.0)})
+                     "expected": sorted(expected), "ms": float(result.get("processing_time_ms") or 0.0),
+                     "literal_score": read.get("literal_score"), "confidence": read.get("min_token_confidence"),
+                     "formats_tried": read.get("formats_tried")})
         if i % 25 == 0 or i == len(files):
             n = Counter(r["outcome"] for r in rows)
             print(f"{i}/{len(files)}  correct {n['correct']}  WRONG {n['WRONG']}  NOK {n['NOK']}  "
@@ -139,7 +148,8 @@ def main(argv=None):
     slowest = max(rows, key=lambda r: r["ms"])
     report = {"images": len(files), "evaluated": len(rows), "skipped": dict(skipped), "formats": formats,
               "max_width": max_width, "date": args.date, "results": summary,
-              "slowest_image": slowest["image"], "wrong": wrong}
+              "slowest_image": slowest["image"], "wrong": wrong,
+              "per_image": [{k: v for k, v in r.items() if k != "expected"} for r in rows]}
 
     print(f"{'format':<12}{'images':>7}{'correct':>9}{'WRONG':>7}{'NOK':>6}{'avg ms':>9}{'max ms':>9}  NOK reasons")
     for name, s in summary.items():
