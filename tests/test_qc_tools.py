@@ -95,6 +95,45 @@ class TrainFontReaderLabelTests(unittest.TestCase):
         self.assertEqual(label_lines(["#### ##:##"], "6288 10:28", "05/28", t), ["6288 10:28"])
 
 
+class EvaluateImagesTests(unittest.TestCase):
+    FORMATS = [["#### ##:##", "BB ##/##"], ["#### ##:##", "PROD ##/##"], ["#### ##:##"]]
+
+    def _expected(self):
+        from QC_tools.train_font_reader import capture_time
+        from QC_tools.evaluate_images import expected_texts
+        return expected_texts(capture_time("UId_0_Time_15-10-2026_10-28-51_123.jpg"), "05/28", self.FORMATS)
+
+    def test_expected_texts(self):
+        exp = self._expected()
+        self.assertEqual(len(exp), 9)          # 3 formats x 3 line 1 candidates
+        for code in ("6288 10:27 BB 05/28", "6288 10:29 PROD 10/26", "6288 10:28"):
+            self.assertIn(code, exp)
+        self.assertNotIn("6288 10:28 PROD 05/28", exp)
+
+    def test_outcome(self):
+        from QC_tools.evaluate_images import outcome
+        ok = lambda text, fmt: {"text": text, "validation": {"accepted": True, "format": fmt}}
+        self.assertEqual(outcome(ok("6288 10:29 PROD 10/26", self.FORMATS[1]), self._expected()),
+                         ("correct", "6288 10:29 PROD 10/26", "PROD"))
+        self.assertEqual(outcome(ok("6288 10:30 BB 05/28", self.FORMATS[0]), self._expected())[:2],
+                         ("WRONG", "6288 10:30 BB 05/28"))
+        self.assertEqual(outcome(ok("6288 10:28", self.FORMATS[2]), self._expected())[2], "single_line")
+        nok = {"text": "", "failure_reason": "format_mismatch", "validation": {"accepted": False, "format": None}}
+        self.assertEqual(outcome(nok, self._expected()), ("NOK", "", "none"))
+
+    def test_summarize(self):
+        from QC_tools.evaluate_images import summarize
+        rows = [{"outcome": "correct", "format": "BB", "reason": None, "ms": 100.0},
+                {"outcome": "NOK", "format": "none", "reason": "format_mismatch", "ms": 300.0},
+                {"outcome": "WRONG", "format": "BB", "reason": None, "ms": 200.0}]
+        s = summarize(rows)
+        self.assertEqual(list(s), ["BB", "none", "total"])
+        self.assertEqual(s["BB"], {"images": 2, "correct_ok": 1, "wrong_ok": 1, "nok": 0, "nok_reasons": {},
+                                   "avg_ms": 150.0, "max_ms": 200.0})
+        self.assertEqual(s["total"]["nok_reasons"], {"format_mismatch": 1})
+        self.assertEqual(s["total"]["max_ms"], 300.0)
+
+
 class TrainFontReaderLiteralCheckTests(unittest.TestCase):
     """literal_check: fixed characters must read as themselves, letters the
     model doesn't know must at least have print in their cell."""
