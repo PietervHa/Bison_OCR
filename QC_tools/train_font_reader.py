@@ -50,7 +50,7 @@ import cv2
 import numpy as np
 
 from backend.detection.ocr.font_reader import (FontReader, cells_from, ink_maps, literal_class, DEFAULT_MODEL,
-                                               SECOND_LINE_RATIO, _deskew, _fit_cells, _fit_lines, _rotate)
+                                               SECOND_LINE_RATIO, _deskew, _fit_cells, _fit_lines, _rotate, line_pitch)
 
 NAME = re.compile(r"Time_(\d+)-(\d+)-(\d+)_(\d+)-(\d+)-(\d+)_")
 NEW_CLASSES = ["E", "X", "P", "R", "D"]      # O is not a class: it is scored as 0
@@ -215,8 +215,8 @@ def segment_formats(raw, formats):
     (+/-8 and +/-30 deg, as FontReader.read), with the shared work done once:
     the skew angle per orientation and search range (an angle already seen
     in that orientation is not segmented again - same result), the text
-    bands per number of lines, and the cell grid per (band, template line),
-    e.g. line 1 "#### ##:##" once for BB, EXP and PROD.
+    bands per number of lines, and the cell grid per (band, template line,
+    line 1's pitch), e.g. line 1 "#### ##:##" once for BB, EXP and PROD.
     Yields (template, (flipped, first_deg), seg) with seg as segment()."""
     for flip in (False, True):
         fit_ink = raw[::-1, ::-1].copy() if flip else raw
@@ -231,10 +231,12 @@ def segment_formats(raw, formats):
             grids = {}
             for tpl in formats:
                 score, bb = bands[len(tpl)]
+                fits = []
                 for band, tl in zip(bb, tpl):
-                    if (band, tl) not in grids:
-                        grids[band, tl] = _fit_cells(f, band, tl)
-                fits = [grids[band, tl] for band, tl in zip(bb, tpl)]
+                    key = (band, tl, line_pitch(fits[0]) if fits else None)
+                    if key not in grids:
+                        grids[key] = _fit_cells(f, band, tl, key[2])
+                    fits.append(grids[key])
                 yield tpl, (flip, first_deg), {
                     "angle": ang, "bands": bb, "lines": [g for _, g in fits], "line_fit": [s for s, _ in fits],
                     "second_line": len(tpl) == 1 and bands[2][0] > SECOND_LINE_RATIO * score}
@@ -314,6 +316,42 @@ def write_sheet(path, rows):
     if out:
         wmax = max(r.shape[1] for r in out)
         cv2.imwrite(str(path), np.vstack([cv2.copyMakeBorder(r, 0, 3, 0, wmax - r.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255)) for r in out]))
+
+
+def debug_image(path, crop, line1, date, formats, out_dir, scale=3):
+    """Debug images for one camera image: <stem>_crop.png (the locator crop)
+    and per format and orientation (flipped, angle search) <stem>_<format>_
+    <up|down>_<deg>.png: the crop as segmented (flipped, deskewed), enlarged,
+    with the fitted line bands (blue) and cell boxes (green, spaces grey)
+    labelled with the expected character, and the band/grid fit scores."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(path).stem
+    cv2.imwrite(str(out_dir / f"{stem}_crop.png"), crop)
+    _, raw = ink_maps(crop)
+    gray = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    written = []
+    for tpl, (flip, first_deg), seg in segment_formats(raw, formats):
+        img = _rotate(gray[::-1, ::-1].copy() if flip else gray, seg["angle"])
+        img = cv2.cvtColor(cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR)
+        text = label_lines(tpl, line1, date)
+        for (y0, y1), (labels, cells), want in zip(seg["bands"], seg["lines"], text):
+            cv2.rectangle(img, (0, y0 * scale), (img.shape[1] - 1, y1 * scale), (255, 0, 0), 1)
+            chars = iter(want.replace(" ", ""))      # the layout may or may not have the spaces
+            for lab, (a, c) in zip(labels, cells):
+                ch = next(chars) if lab != " " else " "
+                col = (160, 160, 160) if lab == " " else (0, 180, 0)
+                cv2.rectangle(img, (round(a * scale), y0 * scale + 2), (round(c * scale), y1 * scale - 2), col, 1)
+                if lab != " ":
+                    cv2.putText(img, ch, (round(a * scale) + 2, y0 * scale + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        caption = (f"{' / '.join(tpl)}  {'down' if flip else 'up'} +/-{first_deg:g}  angle {seg['angle']:+.1f}  "
+                   f"line_fit {', '.join(f'{s:.3f}' for s in seg['line_fit'])}"
+                   f"{'  SECOND LINE (not read)' if seg['second_line'] else ''}")
+        cap = np.full((18, img.shape[1], 3), 255, np.uint8)
+        cv2.putText(cap, caption, (2, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+        name = f"{stem}_{format_name(tpl)}_{'down' if flip else 'up'}_{first_deg:g}.png"
+        cv2.imwrite(str(out_dir / name), np.vstack([cap, img]))
+        written.append(name)
+    return written
 
 
 _WORKER = {}
@@ -397,7 +435,26 @@ def main(argv=None):
                          "also confirms EXP and PROD prints")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
                     help="processes for labelling the images (default: CPU cores - 1)")
+    ap.add_argument("--debug-images", nargs="+", metavar="NAME", default=None,
+                    help="only write debug images (locator crop, fitted bands and cells per format and "
+                         "orientation) for these file names in <images> to --debug-dir, then exit; no training")
+    ap.add_argument("--debug-dir", type=Path, default=None, help="default: <--out folder>/debug")
     args = ap.parse_args(argv)
+
+    if args.debug_images:
+        debug_dir = args.debug_dir or args.out.parent / "debug"
+        _init_worker(str(args.scorer), args.max_width)
+        by_name = {p.name: p for p in args.images.rglob("*")}
+        for name in args.debug_images:
+            p = by_name.get(name)
+            img = cv2.imread(str(p)) if p else None
+            t = capture_time(name)
+            if img is None or t is None:
+                print(f"{name}: not found / unreadable / no capture time in the name"); continue
+            crop = crop_of(_WORKER["engine"], img, _WORKER["max_width"])
+            files = debug_image(p, crop, line1_text(t), args.date, _WORKER["formats"], debug_dir)
+            print(f"{name}: crop {crop.shape[1]}x{crop.shape[0]}, {len(files)} images in {debug_dir}")
+        return 0
 
     old = FontReader(DEFAULT_MODEL, min_literal_score=-1.0)
 

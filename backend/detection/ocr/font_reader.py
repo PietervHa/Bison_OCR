@@ -68,6 +68,15 @@ def literal_class(ch):
 # fit only splits that line (ratio 1.00 on the fixture crops); on two-line
 # prints it was 1.21-1.57.
 SECOND_LINE_RATIO = 1.1
+# Character pitch searched by the cell grid, as a multiple of the band height.
+# The upper bound was 1.05: wider prints (e.g. an EXP line 2 with a 31 px
+# pitch on a 25 px band, 1.25) could not be fitted and got a grid squeezed
+# over part of the line. The fixture crops measure 0.45-0.72.
+PITCH_RANGE = (0.45, 1.4)
+# Line 2 is printed with line 1's pitch: its grid may differ from line 1's
+# pitch by at most this factor (the fixtures: 0.90-1.08). Without it a
+# half-pitch grid (two cells per glyph) won on dense letters like "EXP".
+LINE_PITCH_TOLERANCE = 1.2
 
 
 # -- geometry (identical to the evaluated prototype) --------------------------
@@ -127,8 +136,17 @@ def _layouts(template_line):
     return out
 
 
-def _fit_cells(fit, band, template_line):
+def _fit_cells(fit, band, template_line, near_pitch=None):
+    """Best fixed-pitch grid for one line: (score, (labels, [(x0, x1), ...])).
+    near_pitch: line 1's pitch (px) - this line's pitch is then searched
+    within LINE_PITCH_TOLERANCE of it instead of PITCH_RANGE alone."""
     y0, y1 = band; h = max(1, y1 - y0)
+    p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
+    if near_pitch:
+        p_lo = max(p_lo, near_pitch / LINE_PITCH_TOLERANCE)
+        p_hi = min(p_hi, near_pitch * LINE_PITCH_TOLERANCE)
+        if p_lo >= p_hi:                                # no overlap: search the plain range
+            p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
     col = fit[y0:y1].sum(axis=0) / h; W = len(col)
     cs = np.r_[0.0, np.cumsum(col)]
 
@@ -139,7 +157,7 @@ def _fit_cells(fit, band, template_line):
     best = (-1e18, None)
     for cells, labels in _layouts(template_line):
         K = len(cells)
-        for p in np.arange(0.45 * h, 1.05 * h, 0.25):
+        for p in np.arange(p_lo, p_hi, 0.25):
             x0 = np.arange(-0.5 * p, W - K * p * 0.8, 0.5)
             if len(x0) == 0:
                 continue
@@ -157,6 +175,12 @@ def _fit_cells(fit, band, template_line):
     return best
 
 
+def line_pitch(fit):
+    """Pitch (px) of a _fit_cells() result, None when it found no grid."""
+    cells = fit[1][1] if fit[1] else []
+    return cells[1][0] - cells[0][0] if len(cells) > 1 else None
+
+
 def ink_maps(crop):
     """(boosted ink for the classifier, un-boosted ink for fitting the grid), 0..1."""
     dbg = {}
@@ -171,7 +195,9 @@ def segment(fit_ink, template, first_deg=8.0):
     ang = _deskew(fit_ink, first_deg=first_deg)
     f = _rotate(fit_ink, ang)
     score, bands = _fit_lines(f, len(template))
-    fits = [_fit_cells(f, band, tl) for band, tl in zip(bands, template)]
+    fits = []
+    for band, tl in zip(bands, template):
+        fits.append(_fit_cells(f, band, tl, line_pitch(fits[0]) if fits else None))
     # line_fit: the grid-fit score per line (how well the template's cell
     # layout matches the column profile), for comparing formats.
     seg = {"angle": ang, "bands": bands, "lines": [g for _, g in fits],

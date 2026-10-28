@@ -120,6 +120,7 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # way to tell rib-ink from character-ink where they're genuinely the
     # same pixels), but that's a small, local loss compared to the
     # alternative of the rib dominating the whole cluster selection.
+    unerased_mask = dark_mask
     if dyn_cfg.get("reject_long_lines", True):
         dark_mask = _erase_long_lines(
             dark_mask,
@@ -207,10 +208,24 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
         max_along_gap=float(dyn_cfg.get("line_extend_max_gap_px", 90)),
     )
 
+    cluster_label_ids = np.array([label_ids[i] for i in cluster])
     xs1 = min(boxes[i][0] for i in cluster)
     ys1 = min(boxes[i][1] for i in cluster)
     xs2 = max(boxes[i][2] for i in cluster)
     ys2 = max(boxes[i][3] for i in cluster)
+
+    # Third pass: grow the cluster over the whole print. The rib eraser
+    # above also erases rows of text (see _erase_long_lines), and what is
+    # left of a character after that can be too small or too far away to
+    # join the cluster - the crop then held only part of the print (e.g.
+    # "19:3" of "6286 19:34", or a PROD print without "6" and "P"). See
+    # _grow_over_print.
+    grown = None
+    if dyn_cfg.get("grow_over_print", False):
+        grown = _grow_over_print(np.isin(labels, cluster_label_ids), unerased_mask, close_kernel, dyn_cfg)
+        gy, gx = np.nonzero(grown)
+        xs1, ys1 = min(xs1, int(gx.min())), min(ys1, int(gy.min()))
+        xs2, ys2 = max(xs2, int(gx.max()) + 1), max(ys2, int(gy.max()) + 1)
 
     padding = int(dyn_cfg.get("padding_px", 10))
     xs1 = max(0, xs1 - padding)
@@ -240,9 +255,10 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # characters, that inflation was biasing/destabilizing the fitted
     # rectangle specifically at the angles between the cardinal points.
     # Fitting to real pixels removes that bias entirely, at any angle.
-    cluster_label_ids = np.array([label_ids[i] for i in cluster])
-    sub_labels = labels[ys1:ys2, xs1:xs2]
-    ink_mask = np.isin(sub_labels, cluster_label_ids).astype(np.uint8)
+    if grown is not None:
+        ink_mask = grown[ys1:ys2, xs1:xs2].astype(np.uint8)
+    else:
+        ink_mask = np.isin(labels[ys1:ys2, xs1:xs2], cluster_label_ids).astype(np.uint8)
     ink_points = cv2.findNonZero(ink_mask)
 
     if ink_points is not None and len(ink_points) >= 3:
@@ -424,6 +440,56 @@ def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0
     return rotated[y1:y2, x1:x2]
 
 
+def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np.ndarray, dyn_cfg: dict) -> np.ndarray:
+    """
+    cluster_ink plus the blobs of the ink mask chained to it, in a mask
+    where only real ribs are erased.
+
+    The rib eraser used for clustering also erases rows of printed
+    characters (Hough bridges the gaps between characters), and without
+    that erasure a whole line of closed text is one blob larger than
+    max_component_dim, so neither mask on its own gives the whole print as
+    clusterable components. Here the clustering result is kept as it is
+    (same seed, same rib handling) and only extended: the ink mask with
+    just the segments erased that have an unbroken stretch of ink of at
+    least grow_rib_min_solid_px (a rib is one continuous stroke, a text row
+    breaks at every character gap), closed like the clustering mask. Its
+    blobs of at most grow_max_dim_px in width and height (a whole line or
+    two-line print, not the cap's rim or a rib remnant running across the
+    frame) that overlap the cluster's ink are added, then repeatedly every
+    such blob within cluster_max_gap_px (the seed clustering's gap) of an
+    added one - the characters of a line are separate blobs.
+    """
+    if dyn_cfg.get("reject_long_lines", True):
+        mask = _erase_long_lines(
+            mask,
+            min_length=int(dyn_cfg.get("long_line_min_length_px", 90)),
+            thickness=int(dyn_cfg.get("long_line_erase_thickness_px", 6)),
+            min_solid_run=int(dyn_cfg.get("grow_rib_min_solid_px", 40)),
+        )
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+    _n, labels, stats, _c = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    max_dim = int(dyn_cfg.get("grow_max_dim_px", 360))
+    max_gap = float(dyn_cfg.get("cluster_max_gap_px", 25))
+    min_area = float(dyn_cfg.get("min_component_area", 3))
+    ok = np.flatnonzero((stats[:, cv2.CC_STAT_WIDTH] <= max_dim) & (stats[:, cv2.CC_STAT_HEIGHT] <= max_dim)
+                        & (stats[:, cv2.CC_STAT_AREA] >= min_area))
+    ok = ok[ok > 0]
+    x1, y1 = stats[ok, cv2.CC_STAT_LEFT], stats[ok, cv2.CC_STAT_TOP]
+    x2, y2 = x1 + stats[ok, cv2.CC_STAT_WIDTH], y1 + stats[ok, cv2.CC_STAT_HEIGHT]
+    added = np.isin(ok, labels[cluster_ink])
+    frontier = np.flatnonzero(added)
+    while len(frontier):
+        f = frontier[:, None]
+        # Edge-to-edge gap between the boxes (0 when they overlap).
+        gx = np.maximum(0, np.maximum(x1[f], x1) - np.minimum(x2[f], x2))
+        gy = np.maximum(0, np.maximum(y1[f], y1) - np.minimum(y2[f], y2))
+        near = ((np.hypot(gx, gy) <= max_gap).any(axis=0)) & ~added
+        added |= near
+        frontier = np.flatnonzero(near)
+    return cluster_ink | np.isin(labels, ok[added])
+
+
 def _extend_cluster_along_line(boxes: list, seed: list, max_perp_dist: float, max_along_gap: float) -> list:
     """
     Grow a seed cluster by pulling in components that lie close to the
@@ -538,7 +604,8 @@ def _largest_proximity_cluster(boxes: list, areas: list, max_gap: float) -> list
     return max(clusters.values(), key=lambda idxs: sum(areas[i] for i in idxs))
 
 
-def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6) -> np.ndarray:
+def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6,
+                      min_solid_run: int = 0) -> np.ndarray:
     """Detect and blank out long straight line segments in a binary mask.
 
     Used to strip a bottle cap's molded ribs out of the ink mask before
@@ -555,6 +622,15 @@ def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6
     can actually find candidate segments; min_length is enforced only in
     the filter loop below. (The same bug was found on a real crop in the
     former rib-inpainting step.)
+
+    min_solid_run: only erase a segment whose longest unbroken stretch of
+    ink along it is at least this long (0 = no check). Hough with
+    maxLineGap=15 also finds "lines" along a row of printed characters -
+    the aligned tops, bottoms and bars of the dots of e.g. "6288" or "EXP",
+    bridged across the gaps between characters - and erasing those took
+    most of the print out of the mask (the locator then cropped only a few
+    characters: single-line, PROD and EXP prints). A rib is one continuous
+    stroke; a text row breaks at every character gap.
     """
     lines = cv2.HoughLinesP(mask, 1, np.pi / 180, threshold=60, minLineLength=30, maxLineGap=15)
     if lines is None:
@@ -563,9 +639,31 @@ def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6
     for line in lines:
         x1, y1, x2, y2 = line[0]
         length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-        if length >= min_length:
+        if length >= min_length and (min_solid_run <= 0 or _longest_ink_run(mask, x1, y1, x2, y2) >= min_solid_run):
             cv2.line(out, (x1, y1), (x2, y2), 0, thickness=thickness)
     return out
+
+
+def _longest_ink_run(mask: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> int:
+    """Longest unbroken run of set pixels (px) along the segment, counting a
+    pixel as set when the mask is set on the line or 1 px either side of it
+    (a rib is a few px wide and Hough's line need not run down its middle)."""
+    n = int(max(abs(x2 - x1), abs(y2 - y1))) + 1
+    xs, ys = np.linspace(x1, x2, n), np.linspace(y1, y2, n)
+    nx, ny = -(y2 - y1), x2 - x1
+    norm = max(1e-6, float(np.hypot(nx, ny)))
+    nx, ny = nx / norm, ny / norm
+    h, w = mask.shape[:2]
+    on = np.zeros(n, bool)
+    for o in (-1, 0, 1):
+        xx = np.clip(np.round(xs + o * nx).astype(int), 0, w - 1)
+        yy = np.clip(np.round(ys + o * ny).astype(int), 0, h - 1)
+        on |= mask[yy, xx] > 0
+    # Run lengths from the positions where on/off changes.
+    edges = np.flatnonzero(np.diff(np.r_[0, on.astype(np.int8), 0]))
+    runs = edges[1::2] - edges[::2]
+    step = float(np.hypot(x2 - x1, y2 - y1)) / max(1, n - 1)
+    return int(round(float(runs.max()) * step)) if len(runs) else 0
 
 
 def _write_debug(debug_dir: str, **named_images) -> None:

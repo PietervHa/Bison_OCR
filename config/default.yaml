@@ -180,6 +180,17 @@ ocr:
     # Padding in pixels added around the detected text block before
     # cropping, so characters at the edge aren't clipped.
     padding_px: 25
+    # Grow the found cluster over the whole print (text_locator.py,
+    # _grow_over_print). The rib eraser above also erases rows of printed
+    # characters, so the cluster alone often held only part of the print
+    # (crop with "19:3" of "6286 19:34", or a print without its first
+    # characters). In a mask where only solid strokes are erased (an
+    # unbroken run of ink of at least grow_rib_min_solid_px - a text row
+    # breaks at every character gap) the blobs chained to the cluster
+    # (gap <= cluster_max_gap_px, each at most grow_max_dim_px) are added.
+    grow_over_print: true
+    grow_rib_min_solid_px: 40
+    grow_max_dim_px: 360
 
     # Debug aid: when true, writes intermediate images (blackhat mask,
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
