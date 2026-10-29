@@ -19,6 +19,7 @@ from backend.detection.ocr.text_locator import (
     _normalize_rect_angle,
     deskew_crop,
     locate_text_region,
+    row_profile_rect,
 )
 
 # Fixed copy of the production ocr.dynamic_roi tuning at the time this test
@@ -148,6 +149,64 @@ class DeskewOrientationTests(unittest.TestCase):
                 continue
             crop = deskew_crop(frame, loc["rotated_rect"], extra_padding_px=20)
             self.assertTrue(_is_upright(crop), f"crop upside-down at tilt {theta}")
+
+
+class SolidLineRetryTests(unittest.TestCase):
+    """With the rib eraser on, Hough "lines" along the synthetic text rows
+    are erased and the locator found the line at only 11 of 33 tilts (the
+    one-line prints of the 514 test images: no_text_detected). Retrying
+    with only solid lines erased (long_line_min_solid_px) finds them."""
+
+    @classmethod
+    def setUpClass(cls):
+        logging.disable(logging.WARNING)
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.disable(logging.NOTSET)
+
+    def test_text_rows_erased_as_lines_are_found_by_the_retry(self):
+        cfg = dict(DYN_CFG, reject_long_lines=True, long_line_min_solid_px=40)
+        missed = [t for t in range(-80, 81, 5) if locate_text_region(_frame_with_tilt(t), cfg) is None]
+        self.assertEqual(missed, [])
+
+    def test_retry_off_keeps_the_old_behaviour(self):
+        cfg = dict(DYN_CFG, reject_long_lines=True, long_line_min_solid_px=0)
+        found = sum(locate_text_region(_frame_with_tilt(t), cfg) is not None for t in range(-80, 81, 5))
+        self.assertLess(found, 33)
+
+
+class RowProfileRectTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        logging.disable(logging.WARNING)
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.disable(logging.NOTSET)
+
+    def test_matches_the_line_angle_and_deskews_upright(self):
+        for theta in range(-80, 81, 10):
+            frame = _frame_with_tilt(theta)
+            loc = locate_text_region(frame, DYN_CFG)
+            self.assertIsNotNone(loc, f"not located at tilt {theta}")
+            rect = row_profile_rect(loc["ink_points"], DYN_CFG["padding_px"])
+            diff = (rect["angle"] - loc["rotated_rect"]["angle"] + 90) % 180 - 90
+            self.assertLess(abs(diff), 2.0, f"row angle {rect['angle']} vs rect {loc['rotated_rect']['angle']}")
+            crop = deskew_crop(frame, rect, extra_padding_px=20)
+            self.assertGreater(crop.shape[1], crop.shape[0], f"crop not landscape at tilt {theta}")
+            self.assertTrue(_is_upright(crop), f"crop upside-down at tilt {theta}")
+
+    def test_ignores_a_stroke_that_tilts_the_tightest_box(self):
+        # Two level rows of dots plus a diagonal stroke (a rib remnant):
+        # minAreaRect tilts with the stroke, the row profile stays level.
+        xs = np.arange(0, 120, 4.0)
+        rows = [np.c_[xs, np.full_like(xs, y)] for y in (0, 1, 2, 40, 41, 42)]
+        stroke = np.c_[120 + np.arange(0, 60.0), 42 + np.arange(0, 60.0)]
+        pts = np.vstack(rows + [stroke]).astype(np.float32) + 100
+        tight = cv2.minAreaRect(pts)[2]
+        self.assertGreater(min(abs(tight) % 90, 90 - abs(tight) % 90), 5)
+        self.assertAlmostEqual(row_profile_rect(pts, 0)["angle"], 0.0, delta=0.5)
 
 
 if __name__ == "__main__":

@@ -134,7 +134,6 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     close_w = int(dyn_cfg.get("morph_kernel_w", 9))
     close_h = int(dyn_cfg.get("morph_kernel_h", 5))
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(1, close_w), max(1, close_h)))
-    closed = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, close_kernel)
 
     min_area = float(dyn_cfg.get("min_component_area", 3))
     max_area = float(dyn_cfg.get("max_component_area", 2000))
@@ -152,24 +151,28 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # one dimension.
     max_component_dim = float(dyn_cfg.get("max_component_dim", 70))
 
-    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    def components(mask):
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(closed, connectivity=8)
+        boxes = []
+        label_ids = []
+        areas = []
+        for i in range(1, num_labels):  # label 0 is background
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < min_area or area > max_area:
+                continue
+            cw = stats[i, cv2.CC_STAT_WIDTH]
+            ch = stats[i, cv2.CC_STAT_HEIGHT]
+            if cw > max_component_dim or ch > max_component_dim:
+                continue
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            boxes.append((x, y, x + cw, y + ch))
+            label_ids.append(i)
+            areas.append(int(area))
+        return closed, labels, boxes, label_ids, areas
 
-    boxes = []
-    label_ids = []
-    areas = []
-    for i in range(1, num_labels):  # label 0 is background
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < min_area or area > max_area:
-            continue
-        cw = stats[i, cv2.CC_STAT_WIDTH]
-        ch = stats[i, cv2.CC_STAT_HEIGHT]
-        if cw > max_component_dim or ch > max_component_dim:
-            continue
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        boxes.append((x, y, x + cw, y + ch))
-        label_ids.append(i)
-        areas.append(int(area))
+    closed, labels, boxes, label_ids, areas = components(dark_mask)
 
     if debug_dir:
         _write_debug(cycle_debug_dir, search=search, blackhat=blackhat, dark_mask=dark_mask, closed=closed)
@@ -181,6 +184,24 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # real text.
     seed_gap = float(dyn_cfg.get("cluster_max_gap_px", 25))
     cluster = _largest_proximity_cluster(boxes, areas, max_gap=seed_gap)
+
+    # No cluster: retry with only the solid lines erased
+    # (long_line_min_solid_px, see _erase_long_lines). Hough also finds
+    # "lines" along a dotted row of text; erasing those usually helps (it
+    # splits a closed row into per-character components that pass
+    # max_component_dim), but on a one-line print it can leave nothing to
+    # cluster. Only a frame without a cluster is retried, so every frame
+    # that clusters above is located exactly as before.
+    min_solid = int(dyn_cfg.get("long_line_min_solid_px", 0))
+    if (not cluster or len(cluster) < min_components) and min_solid > 0 and dyn_cfg.get("reject_long_lines", True):
+        dark_mask = _erase_long_lines(
+            unerased_mask,
+            min_length=int(dyn_cfg.get("long_line_min_length_px", 90)),
+            thickness=int(dyn_cfg.get("long_line_erase_thickness_px", 6)),
+            min_solid_run=min_solid,
+        )
+        closed, labels, boxes, label_ids, areas = components(dark_mask)
+        cluster = _largest_proximity_cluster(boxes, areas, max_gap=seed_gap)
 
     if not cluster or len(cluster) < min_components:
         log.debug(
@@ -304,7 +325,51 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
         cv2.drawContours(annotated, [np.intp(box_pts)], 0, (0, 255, 0), 2)
         _write_debug(cycle_debug_dir, bbox_overlay=annotated)
 
-    return {"bbox": bbox, "rotated_rect": rotated_rect, "score": score, "cycle_debug_dir": cycle_debug_dir}
+    points[:, 0] += sx1
+    points[:, 1] += sy1
+    return {"bbox": bbox, "rotated_rect": rotated_rect, "score": score, "cycle_debug_dir": cycle_debug_dir,
+            "ink_points": points}
+
+
+def row_profile_rect(points: np.ndarray, padding: int) -> dict:
+    """
+    Rotated rect around *points* (the ink_points of locate_text_region, frame
+    coordinates) at the angle where the ink's row profile is sharpest, in
+    the same form as locate_text_region's rotated_rect.
+
+    minAreaRect's angle is the tightest box, not the print's line
+    direction: with a rib or embossing remnant in the ink, or a two-line
+    print whose box is close to square, it was tilted 10-50 degrees off a
+    level print and the deskewed crop held the print at that tilt. The
+    rows of a print project onto a few sharp peaks only when looked at
+    along the line direction, so the angle maximising the sum of squared
+    row counts (1 degree steps, refined in 0.25 degree steps) is the line
+    direction. A straight stroke with more ink than the print's rows (a
+    long rib remnant) can win instead. Used only as a second attempt on a
+    read that failed (see OCRead.read), so a print the minAreaRect angle
+    reads stays as it is.
+    """
+    x, y = points[:, 0].astype(np.float64), points[:, 1].astype(np.float64)
+
+    def sharpness(a):
+        t = np.deg2rad(a)
+        v = -x * np.sin(t) + y * np.cos(t)
+        return float((np.bincount(np.round(v - v.min()).astype(int)).astype(np.float64) ** 2).sum())
+
+    a = max(np.arange(-90.0, 90.0, 1.0), key=sharpness)
+    a = float(max(np.arange(a - 1.0, a + 1.01, 0.25), key=sharpness))
+    t = np.deg2rad(a)
+    c, s = np.cos(t), np.sin(t)
+    u, v = x * c + y * s, -x * s + y * c
+    uc, vc = (u.min() + u.max()) / 2, (v.min() + v.max()) / 2
+    angle = (a + 90.0) % 180.0 - 90.0
+    if angle == -90.0:
+        angle = 90.0
+    return {
+        "center": [float(uc * c - vc * s), float(uc * s + vc * c)],
+        "size": [float(u.max() - u.min() + 1 + 2 * padding), float(v.max() - v.min() + 1 + 2 * padding)],
+        "angle": angle,
+    }
 
 
 def _normalize_rect_angle(rw: float, rh: float, angle: float) -> tuple[float, float, float]:

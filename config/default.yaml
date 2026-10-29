@@ -124,6 +124,14 @@ ocr:
     reject_long_lines: true
     long_line_min_length_px: 60
     long_line_erase_thickness_px: 6
+    # When the frame gives no text cluster, retry with only the lines
+    # erased that have an unbroken run of ink of at least this many px
+    # (0 = no retry). Hough also finds "lines" along a dotted row of
+    # printed characters; erasing those usually helps (it splits a row
+    # into per-character components) but on one-line prints it left
+    # nothing to cluster. A rib is one continuous stroke, a text row
+    # breaks at every character gap.
+    long_line_min_solid_px: 40
     # Morphological close kernel used to merge individual dots/pins of a
     # dot-matrix character back into a single connected component before
     # measuring component size. Wider than tall, since characters in a
@@ -195,6 +203,20 @@ ocr:
     grow_over_print: true
     grow_rib_min_solid_px: 40
     grow_max_dim_px: 360
+    # Second attempt for a read that failed (engine.py, _row_angle_retry):
+    # deskew at the angle of the print's rows instead of the tightest box's
+    # angle (which a rib or embossing in the ink tilted 10-50 degrees off a
+    # level print), when the two differ by at least min_diff_deg. The first
+    # attempt is never replaced, so a read it accepts stays as it is. The
+    # retry is accepted only when it passes every normal check AND these
+    # stricter gates: a misfitted cell grid can still fit the template
+    # with one digit guessed (e.g. "EXP 06/28" for "EXP 05/28" at digit
+    # confidence 0.16); accepted first reads are >= 0.95 in 99% of the
+    # test images.
+    row_angle_retry: true
+    row_angle_retry_min_diff_deg: 3.0
+    row_angle_retry_min_digit_confidence: 0.9
+    row_angle_retry_min_literal_score: -0.05
 
     # Debug aid: when true, writes intermediate images (blackhat mask,
     # detected bbox overlay, etc.) to debug_dir on every read - useful for

@@ -38,7 +38,7 @@ from backend.core.config_loader import cfg
 from backend.detection.ocr.code_validator import (CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE, REJECT_NO_TEXT,
                                                   REJECT_TIMEOUT)
 from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
-from backend.detection.ocr.text_locator import locate_text_region, deskew_crop
+from backend.detection.ocr.text_locator import locate_text_region, deskew_crop, row_profile_rect
 from backend.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -92,6 +92,12 @@ class OCRead:
         self.time_budget_ms = float(val_cfg.get("time_budget_ms", 1500) or 0)
         self.skipped_formats = []
         self._last_located = None
+        # Second attempt at the print's row angle for a read that failed
+        # (see read()); accepted only past these stricter gates.
+        self.row_angle_retry = bool(dynamic_roi_cfg.get("row_angle_retry", False))
+        self.row_angle_retry_min_diff_deg = float(dynamic_roi_cfg.get("row_angle_retry_min_diff_deg", 3.0))
+        self.row_angle_retry_min_confidence = float(dynamic_roi_cfg.get("row_angle_retry_min_digit_confidence", 0.9))
+        self.row_angle_retry_min_literal = float(dynamic_roi_cfg.get("row_angle_retry_min_literal_score", -0.05))
 
         # Font reader: classifier trained on this printer's dot font
         # (font_reader.py). If it can't be used, every read is reported as a
@@ -275,6 +281,60 @@ class OCRead:
                 log.warning("Raw crop debug write failed (non-fatal): %s", exc)
         return roi_frame, cycle_debug_dir, profile_data, located
 
+    def _check(self, validator, r):
+        """Reject reason for the chosen read of _read_all_formats: the font
+        reader's own gates, then the template check. None = accepted."""
+        if r is None:
+            return REJECT_FORMAT
+        # The font reader has its own gates (literal_score, digit confidence);
+        # the template check here adds the value_pattern sanity check.
+        verdict = validator.validate([{"text": line, "confidence": 1.0} for line in r["lines"]])
+        if r["literal_score"] < self.font_reader.min_literal_score:
+            return REJECT_FORMAT
+        if r["confidence"] < self.font_reader.min_digit_confidence:
+            return REJECT_CONFIDENCE
+        return verdict["reason"]
+
+    def _row_angle_retry(self, frame, located, deadline):
+        """Second attempt for a read that failed: deskew at the angle of the
+        print's rows (text_locator.row_profile_rect) instead of the
+        minAreaRect angle, and read all formats again within the same
+        deadline. The minAreaRect box was tilted 10-50 degrees off a level
+        print on caps with a rib or embossing in the ink (33 of the 514 test
+        images); the first attempt is never replaced by this, so a read it
+        accepts stays exactly as it was.
+
+        Returns (validator, read, attempts, step_ms, angle) when the retry
+        passes every check of a normal read AND the stricter retry gates
+        (row_angle_retry_min_digit_confidence / _min_literal_score: a
+        misfitted cell grid can still fit the template with one digit
+        guessed, e.g. "EXP 06/28" for "EXP 05/28" at digit confidence 0.16,
+        where accepted first reads are >= 0.95 in 99% of the test images);
+        otherwise None. Also None when the row angle is within
+        row_angle_retry_min_diff_deg of the first attempt's (same crop)."""
+        points = located.get("ink_points")
+        if points is None or len(points) < 3:
+            return None
+        padding = int(self.dynamic_roi_cfg.get("padding_px", 10))
+        rect = row_profile_rect(points, padding)
+        first = located["rotated_rect"]["angle"]
+        if abs((rect["angle"] - first + 90.0) % 180.0 - 90.0) < self.row_angle_retry_min_diff_deg:
+            return None
+        crop = deskew_crop(frame, rect, extra_padding_px=20)
+        if crop is None:
+            return None
+        try:
+            validator, r, attempts, step_ms = self._read_all_formats(self._downscale_roi(crop), deadline)
+        except ReadTimeout:
+            return None
+        reason = self._check(validator, r)
+        if (reason is not None or r["confidence"] < self.row_angle_retry_min_confidence
+                or r["literal_score"] < self.row_angle_retry_min_literal):
+            log.debug("Row angle retry (%.1f deg) not accepted: %s", rect["angle"],
+                      reason or f"literal {r['literal_score']} confidence {r['confidence']}")
+            return None
+        return validator, r, attempts, step_ms, rect["angle"]
+
     def read(self, frame, profile=False):
         """
         Read the printed code from the frame.
@@ -303,6 +363,7 @@ class OCRead:
         t0 = time.perf_counter()
         crop, cycle_debug_dir, profile_data, located = self._prepare(frame)
         validator, r, attempts, step_ms, reason = None, None, [], {}, None
+        retry_angle = None
         if located is None and self.dynamic_roi_enabled:
             reason = REJECT_NO_TEXT            # no print found: nothing to read
         else:
@@ -311,22 +372,15 @@ class OCRead:
                 validator, r, attempts, step_ms = self._read_all_formats(crop, deadline)
             except ReadTimeout as exc:
                 attempts, step_ms, reason = exc.attempts, exc.step_ms, REJECT_TIMEOUT
+            if reason is None:
+                reason = self._check(validator, r)
+                if reason is not None and self.row_angle_retry and located is not None:
+                    retry = self._row_angle_retry(frame, located, deadline)
+                    if retry is not None:
+                        validator, r, retry_attempts, step_ms, retry_angle = retry
+                        attempts = attempts + [dict(a, retry=True) for a in retry_attempts]
+                        reason = None
         elapsed = (time.perf_counter() - t0) * 1000.0
-        if reason is not None:
-            candidates, verdict = [], None
-        elif r is None:
-            reason, candidates, verdict = REJECT_FORMAT, [], None
-        else:
-            candidates = [{"text": line, "confidence": r["confidence"]} for line in r["lines"]]
-            # The font reader has its own gates (literal_score, digit confidence);
-            # the template check here adds the value_pattern sanity check.
-            verdict = validator.validate([{"text": line, "confidence": 1.0} for line in r["lines"]])
-            if r["literal_score"] < self.font_reader.min_literal_score:
-                reason = REJECT_FORMAT
-            elif r["confidence"] < self.font_reader.min_digit_confidence:
-                reason = REJECT_CONFIDENCE
-            else:
-                reason = verdict["reason"]
         accepted = reason is None
         if not accepted and located is None and reason == REJECT_FORMAT:
             reason = "no_text_detected"   # no print found on the frame and nothing readable
@@ -335,8 +389,7 @@ class OCRead:
         # read is not a reading (it looked like guessing on the HMI). It is
         # kept only in the debug file.
         text = r["text"] if accepted else ""
-        if not accepted:
-            candidates = []
+        candidates = [{"text": line, "confidence": r["confidence"]} for line in r["lines"]] if accepted else []
         read_summary = {"variant": "font_reader", "accepted": accepted, "reason": reason,
                         "text": r["text"] if accepted else None, "raw_text": text,
                         "min_token_confidence": r["confidence"] if r else None,
@@ -345,7 +398,8 @@ class OCRead:
                         # Per step over all formats, incl. locating the print.
                         "step_ms": {"locate": round(profile_data.get("roi_ms", 0.0), 1), **step_ms},
                         "orientation": ("reversed" if r and r["flipped"] else "normal") if r else None,
-                        "format": validator.lines if validator else None, "formats_tried": attempts}
+                        "format": validator.lines if validator else None, "formats_tried": attempts,
+                        "row_angle_retry": retry_angle}
         if cycle_debug_dir:
             try:
                 os.makedirs(cycle_debug_dir, exist_ok=True)

@@ -261,6 +261,87 @@ def _res(*lines, lit=-0.1, conf=0.99):
             "flipped": False, "angle": 0.0}
 
 
+class _SequenceReader(_PerFormatReader):
+    """Fake font reader: reads `first` per template on the first crop,
+    `retry` on any later crop (the row angle retry)."""
+
+    def __init__(self, first, retry):
+        super().__init__(first)
+        self.retry = {tuple(k): v for k, v in retry.items()}
+        self.crops = []
+
+    def read(self, crop, template):
+        if not any(c is crop for c in self.crops):
+            self.crops.append(crop)
+        self.calls.append(list(template))
+        return (self.results if self.crops[0] is crop else self.retry).get(tuple(template))
+
+
+class OCReadRowAngleRetryTests(unittest.TestCase):
+    """A failed read is retried once at the print's row angle; the retry is
+    accepted only past the normal checks and the stricter retry gates, and
+    an accepted first read is never retried."""
+
+    def _engine(self, first, retry, box_angle=35.0):
+        from backend.detection.ocread import engine
+        e = engine.OCRead()
+        e.dynamic_roi_debug_dir = None
+        e.validators = [engine.CodeTemplate(f, value_pattern=VALUE_PATTERN) for f in (TPL, TPL_ONE)]
+        e.skipped_formats = []
+        e.row_angle_retry = True
+        e.row_angle_retry_min_diff_deg = 3.0
+        e.row_angle_retry_min_confidence, e.row_angle_retry_min_literal = 0.9, -0.05
+        e.font_reader = _SequenceReader(first, retry)
+        # A level two-line print (rows of ink at y=200 and y=230) whose box
+        # the locator tilted by box_angle.
+        xs = np.arange(250, 500, 3.0)
+        pts = np.vstack([np.c_[xs, np.full_like(xs, y)] for y in (199, 200, 201, 229, 230, 231)]).astype(np.float32)
+        located = {"bbox": [250, 190, 500, 240], "ink_points": pts,
+                   "rotated_rect": {"center": [375.0, 215.0], "size": [300.0, 90.0], "angle": box_angle}}
+        e._prepare = lambda frame: (frame[150:300, 200:550], None, {}, located)
+        return e
+
+    def _frame(self):
+        return np.full((480, 744, 3), 190, np.uint8)
+
+    def test_failed_read_is_accepted_from_the_retry(self):
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 88/88", lit=-6.0)},
+                         {tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=1.0)})
+        r = e.read(self._frame())
+        self.assertEqual(r["text"], "6288 13:19 BB 05/28")
+        summary = r["validation"]["reads"][0]
+        self.assertAlmostEqual(summary["row_angle_retry"], 0.0, delta=0.5)
+        self.assertTrue(any(a.get("retry") for a in summary["formats_tried"]))
+
+    def test_accepted_first_read_is_not_retried(self):
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 05/28")},
+                         {tuple(TPL): _res("6288 13:19", "BB 06/28", lit=0.0, conf=1.0)})
+        r = e.read(self._frame())
+        self.assertEqual(r["text"], "6288 13:19 BB 05/28")
+        self.assertIsNone(r["validation"]["reads"][0]["row_angle_retry"])
+        self.assertEqual(len(e.font_reader.crops), 1)
+
+    def test_retry_below_the_digit_confidence_gate_stays_nok(self):
+        # 15-10-2026_5-58-43_122: the retry's line 2 cells were half a cell
+        # off and "05/28" fit the template as "06/28" at confidence 0.16.
+        e = self._engine({tuple(TPL): _res("6288 05:58", "BB 88/88", lit=-6.0)},
+                         {tuple(TPL): _res("6288 05:58", "BB 06/28", lit=0.0, conf=0.161)})
+        r = e.read(self._frame())
+        self.assertEqual((r["failure_reason"], r["text"]), ("format_mismatch", ""))
+        self.assertIsNone(r["validation"]["reads"][0]["row_angle_retry"])
+
+    def test_retry_below_the_literal_gate_stays_nok(self):
+        e = self._engine({tuple(TPL): _res("6288 05:58", "BB 88/88", lit=-6.0)},
+                         {tuple(TPL): _res("6288 05:58", "BB 05/28", lit=-0.4, conf=1.0)})
+        self.assertEqual(e.read(self._frame())["failure_reason"], "format_mismatch")
+
+    def test_no_retry_when_the_row_angle_matches_the_box(self):
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 88/88", lit=-6.0)},
+                         {tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=1.0)}, box_angle=1.0)
+        self.assertEqual(e.read(self._frame())["failure_reason"], "format_mismatch")
+        self.assertEqual(len(e.font_reader.crops), 1)
+
+
 class OCReadFormatSelectionTests(unittest.TestCase):
     def _engine(self, results, formats=ALL_FORMATS, skipped=()):
         from backend.detection.ocread import engine
