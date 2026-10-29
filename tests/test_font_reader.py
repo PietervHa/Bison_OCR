@@ -342,6 +342,53 @@ class OCReadRowAngleRetryTests(unittest.TestCase):
         self.assertEqual(len(e.font_reader.crops), 1)
 
 
+class OCReadTwoLineGuardTests(unittest.TestCase):
+    """Real frames of two-line prints that must never come out as a one-line
+    code (line 2 ignored), with the production config and retries:
+
+    - two_line_bb_line2_dots_missing (1-10-2026_19-30-54): "6274 19:31" /
+      "BB 05/28" with line 2 printed with dots missing - a misprint, NOK.
+      A retry that read each line band on its own accepted "6274 19:31".
+    - two_line_bb_rib_across (15-10-2026_14-56-21) and
+      two_line_exp_rib_across (15-10-2026_5-58-43): "BB 05/28" and
+      "EXP 05/28" prints with a rib across them; the same retry accepted
+      line 1 of the first as "6288 14:56".
+
+    No time budget, so a NOK here is never just a timeout."""
+
+    FRAMES = FIX.parent / "ocread"
+
+    @classmethod
+    def setUpClass(cls):
+        import logging
+        from backend.detection.ocread.engine import OCRead
+        from QC_tools.evaluate_images import load_image
+        logging.disable(logging.WARNING)
+        cls.engine = OCRead()
+        cls.engine.dynamic_roi_debug_dir = None
+        cls.engine.time_budget_ms = 0
+        cls.load = staticmethod(load_image)
+
+    @classmethod
+    def tearDownClass(cls):
+        import logging
+        logging.disable(logging.NOTSET)
+
+    def _read(self, name):
+        return self.engine.read(self.load(self.FRAMES / name, 744))
+
+    def test_line_2_with_dots_missing_stays_nok(self):
+        r = self._read("two_line_bb_line2_dots_missing.jpg")
+        self.assertFalse(r["validation"]["accepted"])
+        self.assertEqual(r["text"], "")
+
+    def test_two_line_prints_with_a_rib_are_never_read_as_one_line(self):
+        for name in ("two_line_bb_rib_across.jpg", "two_line_exp_rib_across.jpg"):
+            r = self._read(name)
+            if r["validation"]["accepted"]:
+                self.assertEqual(len(r["validation"]["format"]), 2, f"{name}: read as {r['text']!r}")
+
+
 class OCReadFormatSelectionTests(unittest.TestCase):
     def _engine(self, results, formats=ALL_FORMATS, skipped=()):
         from backend.detection.ocread import engine

@@ -151,8 +151,8 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # one dimension.
     max_component_dim = float(dyn_cfg.get("max_component_dim", 70))
 
-    def components(mask):
-        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+    def components(mask, close=True):
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel) if close else mask
         num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(closed, connectivity=8)
         boxes = []
         label_ids = []
@@ -193,6 +193,7 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # cluster. Only a frame without a cluster is retried, so every frame
     # that clusters above is located exactly as before.
     min_solid = int(dyn_cfg.get("long_line_min_solid_px", 0))
+    first_mask = dark_mask
     if (not cluster or len(cluster) < min_components) and min_solid > 0 and dyn_cfg.get("reject_long_lines", True):
         dark_mask = _erase_long_lines(
             unerased_mask,
@@ -202,6 +203,29 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
         )
         closed, labels, boxes, label_ids, areas = components(dark_mask)
         cluster = _largest_proximity_cluster(boxes, areas, max_gap=seed_gap)
+
+    # Still no cluster: last resort, only for frames the passes above give
+    # up on (every frame they locate is located exactly as before). Two
+    # ways a visible print was lost there:
+    # - the cluster with the most ink area is a blob of 2-3 components (a
+    #   rib crossing or embossing remnant) that just outweighs the print's
+    #   own cluster of 14-23 components - the print is then never
+    #   considered, as min_cluster_components is checked on the winner
+    #   only. Here the largest cluster with enough components wins.
+    # - on a one-line print the close above merges each word ("6287") into
+    #   one blob wider than max_component_dim, which is then dropped, and
+    #   the first erasure takes the whole row (see long_line_min_solid_px).
+    #   Here the mask with only the solid lines erased is also tried
+    #   without the close: the print's dots are then its components.
+    if (not cluster or len(cluster) < min_components) and dyn_cfg.get("locate_last_resort", False):
+        variants = [(first_mask, True)]
+        if min_solid > 0 and dyn_cfg.get("reject_long_lines", True):
+            variants += [(dark_mask, True), (dark_mask, False)]
+        for mask, close in variants:
+            closed, labels, boxes, label_ids, areas = components(mask, close)
+            cluster = _largest_proximity_cluster(boxes, areas, max_gap=seed_gap, min_members=min_components)
+            if cluster:
+                break
 
     if not cluster or len(cluster) < min_components:
         log.debug(
@@ -328,7 +352,103 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     points[:, 0] += sx1
     points[:, 1] += sy1
     return {"bbox": bbox, "rotated_rect": rotated_rect, "score": score, "cycle_debug_dir": cycle_debug_dir,
-            "ink_points": points}
+            "ink_points": points,
+            # For alternative_rects(): the other clusters, only worked out
+            # when a read of this one fails.
+            "_clusters": (labels, label_ids, boxes, areas, seed_gap, cluster, min_components, (sx1, sy1))}
+
+
+def alternative_rects(located: dict, n: int, padding: int) -> list:
+    """
+    Rotated rects (same form as rotated_rect) around the next-best clusters
+    of locate_text_region: the up to n largest by ink area, after the one
+    it chose, with at least min_cluster_components components and no
+    component in common with the chosen cluster. For a second attempt when
+    the read of the chosen region failed: the largest cluster can be
+    embossing or a moulding defect when it outweighs the print. At the
+    angle of the cluster's rows (row_profile_rect), not minAreaRect's: the
+    next-best cluster is often a few characters of a one-line print whose
+    row the rib eraser took, and the tightest box around those was tilted
+    up to 90 degrees off the line.
+    """
+    labels, label_ids, boxes, areas, gap, chosen, min_members, (sx1, sy1) = located["_clusters"]
+    chosen = set(chosen)
+    out = []
+    for group in _proximity_clusters(boxes, areas, gap):
+        if len(out) >= n:
+            break
+        if len(group) < min_members or chosen.intersection(group):
+            continue
+        ys, xs = np.nonzero(np.isin(labels, [label_ids[i] for i in group]))
+        out.append(row_profile_rect(np.column_stack([xs + sx1, ys + sy1]).astype(np.float32), padding))
+    return out
+
+
+def extend_rect_along_line(frame: np.ndarray, rect: dict, dyn_cfg: dict) -> Optional[dict]:
+    """
+    *rect* lengthened along its own line over the ink that continues the
+    print, or None when there is none.
+
+    The locator's cluster can hold only part of a one-line print: a rib
+    between "6286" and "18:51" erases or swallows the word on its far side,
+    and the crop then held "18:51" alone. Here the ink mask (blackhat, no
+    rib erasure, so every dot of the print is in it) is looked at inside
+    the rect's text band - its height without the padding - and the rect is
+    extended past each end while ink follows within three text heights (a
+    word space in this dot font is a blank cell plus the gaps on either
+    side: 1.3-2 text heights measured on prints of different sizes; the
+    background beyond the print is a much longer gap), but never more than
+    max_component_dim (~2x the largest character; the band can hold
+    embossing next to the print, and its height is then no measure of the
+    characters). The rect can hold only a few characters of the line, so
+    each end may move by up to ten text heights (a line is ten cells of
+    about one text height), but a result longer than grow_max_dim_px (a
+    whole print) ran on into something else: None. An extension shorter
+    than one text height (a speck next to the print) is not one either. A
+    rib crossing the band adds a few columns of ink, not a print.
+    """
+    padding = int(dyn_cfg.get("padding_px", 10))
+    (cx, cy), (rw, rh), angle = rect["center"], rect["size"], rect["angle"]
+    text_w, text_h = rw - 2 * padding, rh - 2 * padding
+    if text_w <= 0 or text_h <= 0:
+        return None
+    max_len = float(dyn_cfg.get("grow_max_dim_px", 360))
+    reach = text_w / 2 + min(10 * text_h, max_len)      # from the centre, per side
+    corners = cv2.boxPoints(((cx, cy), (2 * reach, rh), angle))
+    h, w = frame.shape[:2]
+    x1, y1 = np.maximum(0, np.floor(corners.min(axis=0)).astype(int))
+    x2, y2 = np.minimum([w, h], np.ceil(corners.max(axis=0)).astype(int) + 1)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    region = frame[y1:y2, x1:x2]
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if region.ndim == 3 else region
+    k = max(1, int(dyn_cfg.get("blackhat_kernel_size", 25)))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    ys, xs = np.nonzero(blackhat > int(dyn_cfg.get("blackhat_threshold", 25)))
+    # Along (u) / across (v) the line: the same axes boxPoints used.
+    t = np.deg2rad(angle)
+    du, dv = np.array([np.cos(t), np.sin(t)]), np.array([-np.sin(t), np.cos(t)])
+    px, py = xs + x1 - cx, ys + y1 - cy
+    u, v = px * du[0] + py * du[1], px * dv[0] + py * dv[1]
+    keep = (np.abs(v) <= text_h / 2) & (np.abs(u) <= reach)
+    cols = np.zeros(int(np.ceil(2 * reach)) + 1, bool)
+    cols[np.round(u[keep] + reach).astype(int)] = True
+    lo, hi = int(round(reach - text_w / 2)), int(round(reach + text_w / 2))
+    max_gap = min(3 * text_h, float(dyn_cfg.get("max_component_dim", 70)))
+
+    def walk(start, step):
+        last, i = start, start + step
+        while 0 <= i < len(cols) and abs(i - last) <= max_gap:
+            if cols[i]:
+                last = i
+            i += step
+        return last
+    new_lo, new_hi = walk(lo, -1), walk(hi, 1)
+    if max(lo - new_lo, new_hi - hi) < text_h or new_hi - new_lo > max_len:
+        return None
+    mid = (new_lo + new_hi) / 2 - reach
+    return {"center": [float(cx + mid * du[0]), float(cy + mid * du[1])],
+            "size": [float(new_hi - new_lo + 2 * padding), float(rh)], "angle": float(angle)}
 
 
 def row_profile_rect(points: np.ndarray, padding: int) -> dict:
@@ -605,11 +725,12 @@ def _extend_cluster_along_line(boxes: list, seed: list, max_perp_dist: float, ma
     return extended
 
 
-def _largest_proximity_cluster(boxes: list, areas: list, max_gap: float) -> list:
+def _largest_proximity_cluster(boxes: list, areas: list, max_gap: float, min_members: int = 1) -> list:
     """
     Groups boxes via union-find, connecting any two whose gap (edge-to-edge
     distance) is <= max_gap, and returns the indices of the group with the
-    most total ink area.
+    most total ink area among the groups of at least min_members boxes
+    ([] when there is none). See _proximity_clusters.
 
     Originally scored by component count instead of area - printed text is
     several small components sitting close together, so "the most members"
@@ -631,6 +752,13 @@ def _largest_proximity_cluster(boxes: list, areas: list, max_gap: float) -> list
     check downstream, which a single component fails on its own the same
     way it always did.
     """
+    groups = [idxs for idxs in _proximity_clusters(boxes, areas, max_gap) if len(idxs) >= min_members]
+    return groups[0] if groups else []
+
+
+def _proximity_clusters(boxes: list, areas: list, max_gap: float) -> list:
+    """Every union-find group of _largest_proximity_cluster (lists of box
+    indices), the most total ink area first."""
     n = len(boxes)
     if n == 0:
         return []
@@ -666,7 +794,8 @@ def _largest_proximity_cluster(boxes: list, areas: list, max_gap: float) -> list
     for i in range(n):
         clusters.setdefault(find(i), []).append(i)
 
-    return max(clusters.values(), key=lambda idxs: sum(areas[i] for i in idxs))
+    # Stable sort: equal areas keep the order max() used to pick from.
+    return sorted(clusters.values(), key=lambda idxs: -sum(areas[i] for i in idxs))
 
 
 def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6,

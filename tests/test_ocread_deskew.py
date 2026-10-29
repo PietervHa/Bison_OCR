@@ -16,8 +16,11 @@ import cv2
 import numpy as np
 
 from backend.detection.ocr.text_locator import (
+    _largest_proximity_cluster,
     _normalize_rect_angle,
+    alternative_rects,
     deskew_crop,
+    extend_rect_along_line,
     locate_text_region,
     row_profile_rect,
 )
@@ -207,6 +210,103 @@ class RowProfileRectTests(unittest.TestCase):
         tight = cv2.minAreaRect(pts)[2]
         self.assertGreater(min(abs(tight) % 90, 90 - abs(tight) % 90), 5)
         self.assertAlmostEqual(row_profile_rect(pts, 0)["angle"], 0.0, delta=0.5)
+
+
+class LargestClusterTests(unittest.TestCase):
+    def test_min_members_skips_a_heavier_group_with_too_few_components(self):
+        # Two big blobs (a rib crossing) outweigh five character-sized ones.
+        boxes = [(0, 0, 40, 40), (45, 0, 85, 40)] + [(300 + 20 * i, 0, 315 + 20 * i, 20) for i in range(5)]
+        areas = [900, 900] + [150] * 5
+        self.assertEqual(_largest_proximity_cluster(boxes, areas, 30), [0, 1])
+        self.assertEqual(_largest_proximity_cluster(boxes, areas, 30, min_members=4), [2, 3, 4, 5, 6])
+        self.assertEqual(_largest_proximity_cluster(boxes, areas, 30, min_members=6), [])
+
+
+def _dotted_words(words, y=240, x0=150, pitch=18, word_gap=30, tilt=0.0):
+    """Frame with words of 3x3 px dot blocks ("characters" 12 px wide, 20 px
+    tall), words word_gap px apart; returns (frame, [(x_start, x_end)])."""
+    canvas = np.full((FRAME_H, FRAME_W), BACKGROUND, np.uint8)
+    spans, x = [], x0
+    for n in words:
+        start = x
+        for _ in range(n):
+            for dx in range(0, 12, 4):
+                for dy in range(0, 20, 4):
+                    canvas[y + dy:y + dy + 3, x + dx:x + dx + 3] = INK
+            x += pitch
+        spans.append((start, x - pitch + 12))
+        x += word_gap - (pitch - 12)
+    if tilt:
+        rot = cv2.getRotationMatrix2D((FRAME_W / 2, FRAME_H / 2), tilt, 1.0)
+        canvas = cv2.warpAffine(canvas, rot, (FRAME_W, FRAME_H), borderValue=BACKGROUND)
+    return cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR), spans
+
+
+class ExtendRectAlongLineTests(unittest.TestCase):
+    """The locator's crop held only "18:51" of "6286 18:51" (a rib between
+    the words): extend_rect_along_line lengthens the rect over the ink that
+    continues the line."""
+
+    def _rect(self, span, y=240, angle=0.0):
+        p = DYN_CFG["padding_px"]
+        return {"center": [(span[0] + span[1]) / 2, y + 10], "size": [span[1] - span[0] + 2 * p, 20 + 2 * p],
+                "angle": angle}
+
+    def test_extends_over_the_other_word(self):
+        frame, (w1, w2) = _dotted_words((4, 5))
+        wide = extend_rect_along_line(frame, self._rect(w2), DYN_CFG)
+        self.assertIsNotNone(wide)
+        p = DYN_CFG["padding_px"]
+        left = wide["center"][0] - wide["size"][0] / 2 + p
+        right = wide["center"][0] + wide["size"][0] / 2 - p
+        self.assertAlmostEqual(left, w1[0], delta=3)
+        self.assertAlmostEqual(right, w2[1], delta=3)
+
+    def test_none_without_ink_beside_the_rect(self):
+        frame, (w,) = _dotted_words((5,))
+        self.assertIsNone(extend_rect_along_line(frame, self._rect(w), DYN_CFG))
+
+    def test_stops_at_a_gap_wider_than_a_word_space(self):
+        frame, (w1, w2) = _dotted_words((4, 5), word_gap=150)
+        self.assertIsNone(extend_rect_along_line(frame, self._rect(w2), DYN_CFG))
+
+    def test_follows_a_tilted_line(self):
+        # Rotated 20 degrees CCW about the frame centre; the rect around the
+        # second word (in the rotated frame) extends along the same line.
+        tilt = 20.0
+        frame, (w1, w2) = _dotted_words((4, 5), tilt=tilt)
+        rot = cv2.getRotationMatrix2D((FRAME_W / 2, FRAME_H / 2), tilt, 1.0)
+        cx, cy = rot @ np.array([(w2[0] + w2[1]) / 2, 250, 1.0])
+        p = DYN_CFG["padding_px"]
+        rect = {"center": [cx, cy], "size": [w2[1] - w2[0] + 2 * p, 20 + 2 * p], "angle": -tilt}
+        wide = extend_rect_along_line(frame, rect, DYN_CFG)
+        self.assertIsNotNone(wide)
+        self.assertAlmostEqual(wide["size"][0] - 2 * p, w2[1] - w1[0], delta=4)
+
+
+class AlternativeRectsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        logging.disable(logging.WARNING)
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.disable(logging.NOTSET)
+
+    def test_next_best_cluster_besides_the_chosen_one(self):
+        # A heavy line and, far below it, a lighter one: the locator picks
+        # the heavy one, the lighter one is the alternative.
+        frame = _frame_with_tilt(0)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        for i in range(5):
+            gray[400:412, 200 + 20 * i:210 + 20 * i] = INK
+        frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        loc = locate_text_region(frame, DYN_CFG)
+        self.assertLess(loc["rotated_rect"]["center"][1], 300)
+        alts = alternative_rects(loc, 2, DYN_CFG["padding_px"])
+        self.assertEqual(len(alts), 1)
+        self.assertAlmostEqual(alts[0]["center"][1], 405.5, delta=2)
+        self.assertAlmostEqual(alts[0]["angle"], 0.0, delta=1)
 
 
 if __name__ == "__main__":

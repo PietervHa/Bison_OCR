@@ -38,7 +38,8 @@ from backend.core.config_loader import cfg
 from backend.detection.ocr.code_validator import (CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE, REJECT_NO_TEXT,
                                                   REJECT_TIMEOUT)
 from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
-from backend.detection.ocr.text_locator import locate_text_region, deskew_crop, row_profile_rect
+from backend.detection.ocr.text_locator import (locate_text_region, deskew_crop, row_profile_rect, alternative_rects,
+                                                extend_rect_along_line)
 from backend.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -98,6 +99,10 @@ class OCRead:
         self.row_angle_retry_min_diff_deg = float(dynamic_roi_cfg.get("row_angle_retry_min_diff_deg", 3.0))
         self.row_angle_retry_min_confidence = float(dynamic_roi_cfg.get("row_angle_retry_min_digit_confidence", 0.9))
         self.row_angle_retry_min_literal = float(dynamic_roi_cfg.get("row_angle_retry_min_literal_score", -0.05))
+        # Further retries on other crops (widened along the line, next-best
+        # clusters), past the same gates; see _retry_rects.
+        self.crop_retry = bool(dynamic_roi_cfg.get("crop_retry", False))
+        self.crop_retry_alternatives = int(dynamic_roi_cfg.get("crop_retry_alternatives", 2))
 
         # Font reader: classifier trained on this printer's dot font
         # (font_reader.py). If it can't be used, every read is reported as a
@@ -145,7 +150,7 @@ class OCRead:
     def _read_formats(self):
         return [v for v in self.validators if v.lines not in self.skipped_formats]
 
-    def _read_all_formats(self, crop, deadline=None):
+    def _read_all_formats(self, crop, deadline=None, prep=None):
         """Read the crop once per supported format and pick one.
 
         Returns (validator, read, attempts, step_ms): the trusted read of the
@@ -158,9 +163,10 @@ class OCRead:
         All formats share one PreparedCrop: what they have in common is
         computed by the first format that needs it, the others reuse it.
         deadline (time.perf_counter()): past it, ReadTimeout is raised, with
-        the attempts and step_ms so far as its .attempts / .step_ms."""
+        the attempts and step_ms so far as its .attempts / .step_ms.
+        prep: the crop's PreparedCrop when the caller has one."""
         reads, attempts = [], []
-        prep = PreparedCrop(crop, deadline)
+        prep = prep or PreparedCrop(crop, deadline)
         # More lines first: once a format is trusted, formats with fewer lines
         # can no longer win and are not read (saves a read per cycle).
         for v in sorted(self._read_formats(), key=lambda v: -len(v.lines)):
@@ -295,45 +301,93 @@ class OCRead:
             return REJECT_CONFIDENCE
         return verdict["reason"]
 
-    def _row_angle_retry(self, frame, located, deadline):
-        """Second attempt for a read that failed: deskew at the angle of the
-        print's rows (text_locator.row_profile_rect) instead of the
-        minAreaRect angle, and read all formats again within the same
-        deadline. The minAreaRect box was tilted 10-50 degrees off a level
-        print on caps with a rib or embossing in the ink (33 of the 514 test
-        images); the first attempt is never replaced by this, so a read it
-        accepts stays exactly as it was.
+    def _retry_crops(self, frame, located, deadline):
+        """The crops a failed read is retried on, in order, as (name,
+        PreparedCrop, rect):
 
-        Returns (validator, read, attempts, step_ms, angle) when the retry
-        passes every check of a normal read AND the stricter retry gates
-        (row_angle_retry_min_digit_confidence / _min_literal_score: a
-        misfitted cell grid can still fit the template with one digit
-        guessed, e.g. "EXP 06/28" for "EXP 05/28" at digit confidence 0.16,
-        where accepted first reads are >= 0.95 in 99% of the test images);
-        otherwise None. Also None when the row angle is within
-        row_angle_retry_min_diff_deg of the first attempt's (same crop)."""
-        points = located.get("ink_points")
-        if points is None or len(points) < 3:
-            return None
+        - "row_angle": deskewed at the angle of the print's rows
+          (text_locator.row_profile_rect) instead of the minAreaRect angle,
+          when they differ by row_angle_retry_min_diff_deg or more. The
+          minAreaRect box was tilted 10-50 degrees off a level print on caps
+          with a rib or embossing in the ink (33 of the 514 test images).
+        - "widened": the located rect lengthened along its line over the
+          ink that continues the print (text_locator.extend_rect_along_line):
+          a rib between the words of a one-line print left the far word out
+          of the cluster, and the crop held only "18:51" of "6286 18:51".
+        - "alternative_<i>" or "alternative_<i>_widened": the next-best
+          clusters (text_locator.alternative_rects, crop_retry_alternatives
+          of them), lengthened like "widened" when there is ink to extend
+          over, when the largest cluster was embossing or a moulding defect
+          instead of the print.
+
+        Generated lazily, after the previous crop was read: a read accepted
+        on an earlier crop costs nothing for the later ones.
+
+        Not retried: each band of a crop on which the one-line format sees
+        two lines, read on its own. It read one-line prints with a rib along
+        them, but also accepted line 1 of a two-line print whose line 2 was
+        printed with dots missing as a one-line code - a rib and a damaged
+        line 2 can't be told apart there."""
         padding = int(self.dynamic_roi_cfg.get("padding_px", 10))
-        rect = row_profile_rect(points, padding)
-        first = located["rotated_rect"]["angle"]
-        if abs((rect["angle"] - first + 90.0) % 180.0 - 90.0) < self.row_angle_retry_min_diff_deg:
-            return None
-        crop = deskew_crop(frame, rect, extra_padding_px=20)
-        if crop is None:
-            return None
+        first = located.get("rotated_rect")
+        if first is None:                               # the axis-aligned box only: no line to work from
+            return
+
+        def prepared(rect):
+            crop = deskew_crop(frame, rect, extra_padding_px=20)
+            return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline)
+
+        points = located.get("ink_points")
+        if self.row_angle_retry and points is not None and len(points) >= 3:
+            rect = row_profile_rect(points, padding)
+            if abs((rect["angle"] - first["angle"] + 90.0) % 180.0 - 90.0) >= self.row_angle_retry_min_diff_deg:
+                prep = prepared(rect)
+                if prep is not None:
+                    yield "row_angle", prep, rect
+        if not self.crop_retry:
+            return
+        wide = extend_rect_along_line(frame, first, self.dynamic_roi_cfg)
+        if wide is not None and (prep := prepared(wide)) is not None:
+            yield "widened", prep, wide
+        if "_clusters" in located and self.crop_retry_alternatives > 0:
+            for i, rect in enumerate(alternative_rects(located, self.crop_retry_alternatives, padding), 1):
+                # The widened rect holds the whole cluster too: one read, not two.
+                wide = extend_rect_along_line(frame, rect, self.dynamic_roi_cfg)
+                name, rect = (f"alternative_{i}", rect) if wide is None else (f"alternative_{i}_widened", wide)
+                if (prep := prepared(rect)) is not None:
+                    yield name, prep, rect
+
+    def _retry(self, frame, located, deadline):
+        """Further attempts for a read that failed, on the crops of
+        _retry_crops in order, within the same deadline; the first one
+        accepted wins. The first attempt is never replaced by this, so a read
+        it accepts stays exactly as it was.
+
+        Returns (accepted, attempts): accepted is (validator, read, step_ms,
+        name, rect) for the first retry that passes every check of a normal read AND the
+        stricter retry gates (row_angle_retry_min_digit_confidence /
+        _min_literal_score: a misfitted cell grid can still fit the template
+        with one digit guessed, e.g. "EXP 06/28" for "EXP 05/28" at digit
+        confidence 0.16, where accepted first reads are >= 0.95 in 99% of
+        the test images); otherwise None, also when the deadline passes.
+        attempts: those of every crop tried, each marked with its retry
+        name, also when none was accepted. rect: the crop's rect in the
+        frame."""
+        tried, name = [], None
         try:
-            validator, r, attempts, step_ms = self._read_all_formats(self._downscale_roi(crop), deadline)
-        except ReadTimeout:
-            return None
-        reason = self._check(validator, r)
-        if (reason is not None or r["confidence"] < self.row_angle_retry_min_confidence
-                or r["literal_score"] < self.row_angle_retry_min_literal):
-            log.debug("Row angle retry (%.1f deg) not accepted: %s", rect["angle"],
-                      reason or f"literal {r['literal_score']} confidence {r['confidence']}")
-            return None
-        return validator, r, attempts, step_ms, rect["angle"]
+            for name, prep, rect in self._retry_crops(frame, located, deadline):
+                validator, r, attempts, step_ms = self._read_all_formats(prep.crop, deadline, prep)
+                tried += [dict(a, retry=name) for a in attempts]
+                reason = self._check(validator, r)
+                if (reason is not None or r["confidence"] < self.row_angle_retry_min_confidence
+                        or r["literal_score"] < self.row_angle_retry_min_literal):
+                    log.debug("Retry %s not accepted: %s", name,
+                              reason or f"literal {r['literal_score']} confidence {r['confidence']}")
+                    continue
+                return (validator, r, step_ms, name, rect), tried
+        except ReadTimeout as exc:
+            tried += [dict(a, retry=name) for a in getattr(exc, "attempts", [])]
+        return None, tried
 
     def read(self, frame, profile=False):
         """
@@ -363,7 +417,7 @@ class OCRead:
         t0 = time.perf_counter()
         crop, cycle_debug_dir, profile_data, located = self._prepare(frame)
         validator, r, attempts, step_ms, reason = None, None, [], {}, None
-        retry_angle = None
+        retry_angle, retry_name = None, None
         if located is None and self.dynamic_roi_enabled:
             reason = REJECT_NO_TEXT            # no print found: nothing to read
         else:
@@ -374,11 +428,12 @@ class OCRead:
                 attempts, step_ms, reason = exc.attempts, exc.step_ms, REJECT_TIMEOUT
             if reason is None:
                 reason = self._check(validator, r)
-                if reason is not None and self.row_angle_retry and located is not None:
-                    retry = self._row_angle_retry(frame, located, deadline)
+                if reason is not None and (self.row_angle_retry or self.crop_retry) and located is not None:
+                    retry, retry_attempts = self._retry(frame, located, deadline)
+                    attempts = attempts + retry_attempts
                     if retry is not None:
-                        validator, r, retry_attempts, step_ms, retry_angle = retry
-                        attempts = attempts + [dict(a, retry=True) for a in retry_attempts]
+                        validator, r, step_ms, retry_name, rect = retry
+                        retry_angle = rect["angle"] if retry_name == "row_angle" else None
                         reason = None
         elapsed = (time.perf_counter() - t0) * 1000.0
         accepted = reason is None
@@ -399,7 +454,7 @@ class OCRead:
                         "step_ms": {"locate": round(profile_data.get("roi_ms", 0.0), 1), **step_ms},
                         "orientation": ("reversed" if r and r["flipped"] else "normal") if r else None,
                         "format": validator.lines if validator else None, "formats_tried": attempts,
-                        "row_angle_retry": retry_angle}
+                        "row_angle_retry": retry_angle, "retry": retry_name}
         if cycle_debug_dir:
             try:
                 os.makedirs(cycle_debug_dir, exist_ok=True)

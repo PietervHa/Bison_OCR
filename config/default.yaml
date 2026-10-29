@@ -208,6 +208,14 @@ ocr:
     # unbroken run of ink of at least grow_rib_min_solid_px - a text row
     # breaks at every character gap) the blobs chained to the cluster
     # (gap <= cluster_max_gap_px, each at most grow_max_dim_px) are added.
+    # Last resort for a frame where the passes above find no cluster
+    # (text_locator.py): take the largest cluster that has
+    # min_cluster_components (not the largest one overall, which can be a
+    # 2-3 blob rib or embossing remnant just outweighing the print), also
+    # in the solid-lines-only mask without the close (which merges each
+    # word of a one-line print into one blob above max_component_dim).
+    # Only frames that were not located before are affected.
+    locate_last_resort: true
     grow_over_print: true
     grow_rib_min_solid_px: 40
     grow_max_dim_px: 360
@@ -225,12 +233,21 @@ ocr:
     row_angle_retry_min_diff_deg: 3.0
     row_angle_retry_min_digit_confidence: 0.9
     row_angle_retry_min_literal_score: -0.05
+    # After the row angle retry, further retries on other crops for a read
+    # that still failed (engine.py, _retry_rects), past the same gates and
+    # within the same time budget: the crop lengthened along the print's
+    # line over the ink that continues it (a rib between the words of a
+    # one-line print left the far word out), then the next-best
+    # crop_retry_alternatives clusters, as they are and lengthened (the
+    # largest cluster was embossing or a moulding defect).
+    crop_retry: true
+    crop_retry_alternatives: 2
 
     # Debug aid: when true, writes intermediate images (blackhat mask,
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
     # tuning the thresholds above against real bottles, but leave off in
     # normal production since it writes a file per cycle.
-    debug_save: false
+    debug_save: true
     debug_dir: "data/debug/dynamic_roi"
 
 # Camera settings
