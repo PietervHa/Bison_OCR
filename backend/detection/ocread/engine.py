@@ -59,6 +59,14 @@ def resolve_project_path(path) -> str:
     return str(p if p.is_absolute() else PROJECT_ROOT / p)
 
 
+def _same_rect(a, b) -> bool:
+    """Two rotated rects (text_locator form) that give the same crop:
+    centre and size within 2 px, angle within 0.5 degrees."""
+    return (max(abs(a["center"][i] - b["center"][i]) for i in (0, 1)) <= 2.0
+            and max(abs(a["size"][i] - b["size"][i]) for i in (0, 1)) <= 2.0
+            and abs((a["angle"] - b["angle"] + 90.0) % 180.0 - 90.0) <= 0.5)
+
+
 class OCRead:
     """
     Reads the printed code from a camera frame with the trained dot-font reader.
@@ -103,6 +111,12 @@ class OCRead:
         # clusters), past the same gates; see _retry_rects.
         self.crop_retry = bool(dynamic_roi_cfg.get("crop_retry", False))
         self.crop_retry_alternatives = int(dynamic_roi_cfg.get("crop_retry_alternatives", 2))
+        # Printed ink vs moulded lettering on a retry (ink_retry): the print
+        # located again with the locator's ink filter, and every retry
+        # deciding "does the crop hold a second line" on printed ink
+        # (font_reader.PreparedCrop.print_ink_ratio). None = off.
+        self.ink_retry = bool(dynamic_roi_cfg.get("ink_retry", False))
+        self.print_ink_ratio = float(dynamic_roi_cfg.get("ink_dark_ratio", 0.6)) if self.ink_retry else None
 
         # Font reader: classifier trained on this printer's dot font
         # (font_reader.py). If it can't be used, every read is reported as a
@@ -301,15 +315,32 @@ class OCRead:
             return REJECT_CONFIDENCE
         return verdict["reason"]
 
-    def _retry_crops(self, frame, located, deadline):
+    def _retry_crops(self, frame, located, first_prep, deadline):
         """The crops a failed read is retried on, in order, as (name,
-        PreparedCrop, rect):
+        PreparedCrop, rect). Every retry reads with the printed-ink line
+        count (PreparedCrop.print_ink_ratio): a second band without printed
+        ink - embossing such as "P2144/1" beside a one-line print - does not
+        refuse the one-line format, which is then read on the printed ink
+        alone. A printed line 2, even with dots missing, is ink and still
+        refuses it.
 
         - "row_angle": deskewed at the angle of the print's rows
           (text_locator.row_profile_rect) instead of the minAreaRect angle,
           when they differ by row_angle_retry_min_diff_deg or more. The
           minAreaRect box was tilted 10-50 degrees off a level print on caps
           with a rib or embossing in the ink (33 of the 514 test images).
+        - "ink_located": the print located again with the locator's ink
+          filter (ink_filter: components without printed ink - embossing -
+          dropped before clustering), when that gives another rect. The
+          embossing beside a print had joined its cluster and tilted the box.
+          Not for the first read: the tighter, level crop it gives read
+          worse on 3 of the 514 test images (line 2's grid one cell off on
+          two EXP prints) that the first locate reads correctly; after
+          "row_angle", whose reads of the first locate came first before.
+          Also tried when the first locate found no print (located None).
+        - "first_print_ink": the first crop again, read that way (its other
+          work is cached; a one-line format is the only read that can
+          change).
         - "widened": the located rect lengthened along its line over the
           ink that continues the print (text_locator.extend_rect_along_line):
           a rib between the words of a one-line print left the far word out
@@ -321,7 +352,11 @@ class OCRead:
           instead of the print.
 
         Generated lazily, after the previous crop was read: a read accepted
-        on an earlier crop costs nothing for the later ones.
+        on an earlier crop costs nothing for the later ones. The first read
+        itself is not read this way: on a crop that cut the print the
+        printed-ink read can be confident and wrong ("6288 18:37" for 18:33
+        at 0.80-0.89 with a wider dot mask), so it is held to the retry
+        gates.
 
         Not retried: each band of a crop on which the one-line format sees
         two lines, read on its own. It read one-line prints with a rib along
@@ -329,22 +364,29 @@ class OCRead:
         printed with dots missing as a one-line code - a rib and a damaged
         line 2 can't be told apart there."""
         padding = int(self.dynamic_roi_cfg.get("padding_px", 10))
-        first = located.get("rotated_rect")
-        if first is None:                               # the axis-aligned box only: no line to work from
-            return
+        first = located.get("rotated_rect") if located else None
 
         def prepared(rect):
             crop = deskew_crop(frame, rect, extra_padding_px=20)
-            return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline)
+            return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline, self.print_ink_ratio)
 
-        points = located.get("ink_points")
+        points = located.get("ink_points") if first is not None else None
         if self.row_angle_retry and points is not None and len(points) >= 3:
             rect = row_profile_rect(points, padding)
             if abs((rect["angle"] - first["angle"] + 90.0) % 180.0 - 90.0) >= self.row_angle_retry_min_diff_deg:
                 prep = prepared(rect)
                 if prep is not None:
                     yield "row_angle", prep, rect
-        if not self.crop_retry:
+        if self.ink_retry and (self.crop_retry or located is None):
+            ink = locate_text_region(frame, dict(self.dynamic_roi_cfg, ink_filter=True))
+            rect = ink["rotated_rect"] if ink else None
+            if rect is not None and (first is None or not _same_rect(rect, first)):
+                if (prep := prepared(rect)) is not None:
+                    yield "ink_located", prep, rect
+        if self.print_ink_ratio is not None and first_prep is not None and self.crop_retry:
+            first_prep.print_ink_ratio = self.print_ink_ratio
+            yield "first_print_ink", first_prep, first
+        if first is None or not self.crop_retry:       # nothing located, or the axis-aligned box only
             return
         wide = extend_rect_along_line(frame, first, self.dynamic_roi_cfg)
         if wide is not None and (prep := prepared(wide)) is not None:
@@ -357,7 +399,7 @@ class OCRead:
                 if (prep := prepared(rect)) is not None:
                     yield name, prep, rect
 
-    def _retry(self, frame, located, deadline):
+    def _retry(self, frame, located, first_prep, deadline):
         """Further attempts for a read that failed, on the crops of
         _retry_crops in order, within the same deadline; the first one
         accepted wins. The first attempt is never replaced by this, so a read
@@ -375,7 +417,7 @@ class OCRead:
         frame."""
         tried, name = [], None
         try:
-            for name, prep, rect in self._retry_crops(frame, located, deadline):
+            for name, prep, rect in self._retry_crops(frame, located, first_prep, deadline):
                 validator, r, attempts, step_ms = self._read_all_formats(prep.crop, deadline, prep)
                 tried += [dict(a, retry=name) for a in attempts]
                 reason = self._check(validator, r)
@@ -420,16 +462,23 @@ class OCRead:
         retry_angle, retry_name = None, None
         if located is None and self.dynamic_roi_enabled:
             reason = REJECT_NO_TEXT            # no print found: nothing to read
+            if self.ink_retry:                 # ... unless the ink-filtered locate finds one
+                deadline = t0 + self.time_budget_ms / 1000.0 if self.time_budget_ms > 0 else None
+                retry, attempts = self._retry(frame, None, None, deadline)
+                if retry is not None:
+                    validator, r, step_ms, retry_name, rect = retry
+                    reason = None
         else:
             deadline = t0 + self.time_budget_ms / 1000.0 if self.time_budget_ms > 0 else None
+            prep = PreparedCrop(crop, deadline)
             try:
-                validator, r, attempts, step_ms = self._read_all_formats(crop, deadline)
+                validator, r, attempts, step_ms = self._read_all_formats(crop, deadline, prep)
             except ReadTimeout as exc:
                 attempts, step_ms, reason = exc.attempts, exc.step_ms, REJECT_TIMEOUT
             if reason is None:
                 reason = self._check(validator, r)
                 if reason is not None and (self.row_angle_retry or self.crop_retry) and located is not None:
-                    retry, retry_attempts = self._retry(frame, located, deadline)
+                    retry, retry_attempts = self._retry(frame, located, prep, deadline)
                     attempts = attempts + retry_attempts
                     if retry is not None:
                         validator, r, step_ms, retry_name, rect = retry

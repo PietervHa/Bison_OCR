@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 
 from backend.detection.ocr.text_locator import (
+    _ink_fraction,
+    _ink_sums,
     _largest_proximity_cluster,
     _normalize_rect_angle,
     alternative_rects,
@@ -282,6 +284,56 @@ class ExtendRectAlongLineTests(unittest.TestCase):
         wide = extend_rect_along_line(frame, rect, DYN_CFG)
         self.assertIsNotNone(wide)
         self.assertAlmostEqual(wide["size"][0] - 2 * p, w2[1] - w1[0], delta=4)
+
+
+class InkFilterTests(unittest.TestCase):
+    """Moulded lettering beside the print passes the blackhat threshold
+    (relief shading) but is not ink: components whose box has too few
+    pixels clearly darker than the plastic (ink_min_dark_fraction) are
+    dropped before clustering."""
+
+    CFG = dict(DYN_CFG, ink_dark_ratio=0.6, ink_min_dark_fraction=0.04, ink_filter=True)
+
+    @classmethod
+    def setUpClass(cls):
+        logging.disable(logging.WARNING)
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.disable(logging.NOTSET)
+
+    def _frame(self):
+        # A printed line of dark dot blocks (40 on 190) at y=300, and above
+        # it heavier "embossing": strokes only a little darker than the
+        # plastic (150: blackhat 40, but 0.79 x the background).
+        gray = np.full((FRAME_H, FRAME_W), BACKGROUND, np.uint8)
+        for i in range(8):
+            for dx in range(0, 12, 4):
+                for dy in range(0, 20, 4):
+                    gray[300 + dy:303 + dy, 250 + 18 * i + dx:253 + 18 * i + dx] = INK
+        for i in range(8):
+            y = 190 + 9 * (i % 2)                       # staggered: not a row the rib eraser takes
+            gray[y:y + 35, 250 + 28 * i:260 + 28 * i] = 150
+            gray[y:y + 10, 250 + 28 * i:272 + 28 * i] = 150
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    def test_shading_lettering_is_not_located(self):
+        loc = locate_text_region(self._frame(), self.CFG)
+        self.assertIsNotNone(loc)
+        self.assertGreater(loc["bbox"][1], 240, f"bbox {loc['bbox']} includes the embossing")
+
+    def test_without_the_filter_the_lettering_wins(self):
+        loc = locate_text_region(self._frame(), dict(self.CFG, ink_min_dark_fraction=0.0))
+        self.assertLess(loc["bbox"][1], 240)
+
+    def test_ink_fraction(self):
+        gray = np.full((50, 50), 190, np.uint8)
+        gray[10:20, 10:20] = 40                         # 100 dark px
+        gray[30:40, 30:40] = 160                        # shading: not dark
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+        sums = _ink_sums(gray, blackhat, self.CFG)
+        self.assertAlmostEqual(_ink_fraction(sums, 10, 10, 20, 20), 0.25, places=3)
+        self.assertEqual(_ink_fraction(sums, 30, 30, 10, 10), 0.0)
 
 
 class AlternativeRectsTests(unittest.TestCase):

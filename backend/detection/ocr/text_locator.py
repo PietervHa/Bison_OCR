@@ -105,6 +105,18 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     blackhat_threshold = int(dyn_cfg.get("blackhat_threshold", 25))
     _, dark_mask = cv2.threshold(blackhat, blackhat_threshold, 255, cv2.THRESH_BINARY)
 
+    # With ink_filter on: printed ink vs moulded lettering ("KKT",
+    # "P2144/1", "209-3"). The embossing's shading passes the blackhat
+    # threshold too, but only printed ink is clearly darker than the
+    # plastic around it. See _ink_fraction; components (and grown blobs)
+    # whose box has less than ink_min_dark_fraction of such pixels are not
+    # print and are dropped before clustering. Without this the embossing
+    # beside a one-line print joined its cluster: the box tilted and the
+    # embossing was read as a second line. OCRead locates this way on a
+    # retry (ocr.dynamic_roi.ink_retry), not for the first read.
+    min_ink = float(dyn_cfg.get("ink_min_dark_fraction", 0.0)) if dyn_cfg.get("ink_filter", False) else 0.0
+    ink_sums = _ink_sums(gray, blackhat, dyn_cfg) if min_ink > 0 else None
+
     # Erase long straight line segments (the cap's molded ribs) from the
     # ink mask before doing anything else with it. On a clean reference
     # photo, blackhat mostly cancels these out on its own (broad,
@@ -167,6 +179,8 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
                 continue
             x = stats[i, cv2.CC_STAT_LEFT]
             y = stats[i, cv2.CC_STAT_TOP]
+            if min_ink > 0 and _ink_fraction(ink_sums, x, y, cw, ch) < min_ink:
+                continue
             boxes.append((x, y, x + cw, y + ch))
             label_ids.append(i)
             areas.append(int(area))
@@ -267,7 +281,8 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # _grow_over_print.
     grown = None
     if dyn_cfg.get("grow_over_print", False):
-        grown = _grow_over_print(np.isin(labels, cluster_label_ids), unerased_mask, close_kernel, dyn_cfg)
+        grown = _grow_over_print(np.isin(labels, cluster_label_ids), unerased_mask, close_kernel, dyn_cfg,
+                                 ink_sums if min_ink > 0 else None)
         gy, gx = np.nonzero(grown)
         xs1, ys1 = min(xs1, int(gx.min())), min(ys1, int(gy.min()))
         xs2, ys2 = max(xs2, int(gx.max()) + 1), max(ys2, int(gy.max()) + 1)
@@ -625,7 +640,8 @@ def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0
     return rotated[y1:y2, x1:x2]
 
 
-def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np.ndarray, dyn_cfg: dict) -> np.ndarray:
+def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np.ndarray, dyn_cfg: dict,
+                     ink_sums: Optional[np.ndarray] = None) -> np.ndarray:
     """
     cluster_ink plus the blobs of the ink mask chained to it, in a mask
     where only real ribs are erased.
@@ -660,6 +676,9 @@ def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np
     ok = np.flatnonzero((stats[:, cv2.CC_STAT_WIDTH] <= max_dim) & (stats[:, cv2.CC_STAT_HEIGHT] <= max_dim)
                         & (stats[:, cv2.CC_STAT_AREA] >= min_area))
     ok = ok[ok > 0]
+    if ink_sums is not None:                            # blobs without printed ink (embossing) are not added
+        min_ink = float(dyn_cfg.get("ink_min_dark_fraction", 0.0))
+        ok = ok[[_ink_fraction(ink_sums, *stats[i, :4]) >= min_ink for i in ok]] if len(ok) else ok
     x1, y1 = stats[ok, cv2.CC_STAT_LEFT], stats[ok, cv2.CC_STAT_TOP]
     x2, y2 = x1 + stats[ok, cv2.CC_STAT_WIDTH], y1 + stats[ok, cv2.CC_STAT_HEIGHT]
     added = np.isin(ok, labels[cluster_ink])
@@ -673,6 +692,25 @@ def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np
         added |= near
         frontier = np.flatnonzero(near)
     return cluster_ink | np.isin(labels, ok[added])
+
+
+def _ink_sums(gray: np.ndarray, blackhat: np.ndarray, dyn_cfg: dict) -> np.ndarray:
+    """Integral image (cv2.integral) of the pixels clearly darker than the
+    plastic around them: gray < ink_dark_ratio x the closing-based
+    background (gray + blackhat = the grayscale closing). Printed ink is
+    darker than 0.6 x the background even on faint prints; embossing is
+    relief shading whose shadow edges reach 0.6-0.7."""
+    background = gray.astype(np.float32) + blackhat.astype(np.float32)
+    dark = (gray.astype(np.float32) < float(dyn_cfg.get("ink_dark_ratio", 0.6)) * background).astype(np.uint8)
+    return cv2.integral(dark)
+
+
+def _ink_fraction(ink_sums: np.ndarray, x: int, y: int, w: int, h: int) -> float:
+    """Fraction of the box (x, y, w, h) that is clearly dark (_ink_sums).
+    On the 514 test images (ratio 0.6): components outside the print mostly
+    < 1%, the print's mostly > 10%, few in between."""
+    s = ink_sums[y + h, x + w] - ink_sums[y, x + w] - ink_sums[y + h, x] + ink_sums[y, x]
+    return float(s) / max(1, w * h)
 
 
 def _extend_cluster_along_line(boxes: list, seed: list, max_perp_dist: float, max_along_gap: float) -> list:

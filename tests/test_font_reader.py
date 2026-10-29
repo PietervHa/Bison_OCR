@@ -389,6 +389,46 @@ class OCReadTwoLineGuardTests(unittest.TestCase):
                 self.assertEqual(len(r["validation"]["format"]), 2, f"{name}: read as {r['text']!r}")
 
 
+class OCReadEmbossingTests(unittest.TestCase):
+    """one_line_beside_embossing (15-10-2026_18-47-16): "6288 18:47" with the
+    moulded "KKT" / "P2144/2" right above it. The embossing joined the
+    locator's cluster and made a second band, so the one-line format was
+    refused (format_mismatch). It is relief shading, not ink: the locator
+    drops it (ink_min_dark_fraction) and a retry reads the one-line format
+    on the printed ink alone. Production config, no time budget."""
+
+    @classmethod
+    def setUpClass(cls):
+        import logging
+        from backend.detection.ocread.engine import OCRead
+        from QC_tools.evaluate_images import load_image
+        logging.disable(logging.WARNING)
+        cls.engine = OCRead()
+        cls.engine.dynamic_roi_debug_dir = None
+        cls.engine.time_budget_ms = 0
+        cls.frame = load_image(FIX.parent / "ocread" / "one_line_beside_embossing.jpg", 744)
+
+    @classmethod
+    def tearDownClass(cls):
+        import logging
+        logging.disable(logging.NOTSET)
+
+    def test_reads_the_one_line_print(self):
+        r = self.engine.read(self.frame)
+        self.assertEqual(r["text"], "6288 18:47")
+        self.assertEqual(r["validation"]["format"], ["#### ##:##"])
+
+    def test_first_read_alone_still_refuses_it(self):
+        # The printed-ink line count is a retry only: without retries the
+        # read stays NOK, as before.
+        e = self.engine
+        e.row_angle_retry, e.crop_retry = False, False
+        try:
+            self.assertFalse(e.read(self.frame)["validation"]["accepted"])
+        finally:
+            e.row_angle_retry, e.crop_retry = True, True
+
+
 class OCReadFormatSelectionTests(unittest.TestCase):
     def _engine(self, results, formats=ALL_FORMATS, skipped=()):
         from backend.detection.ocread import engine

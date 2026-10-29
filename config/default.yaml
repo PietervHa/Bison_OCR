@@ -172,6 +172,29 @@ ocr:
     # rejecting rib/embossing fragments, which ran 80-400+px in at least
     # one dimension on real production frames.
     max_component_dim: 70
+    # Printed ink, not moulded lettering: a component (or a blob grown over
+    # the print) counts only when at least ink_min_dark_fraction of its box
+    # is clearly darker than the plastic around it (gray < ink_dark_ratio x
+    # the closing-based background). Embossing ("KKT", "P2144/1", "209-3")
+    # is relief shading: it passes the blackhat threshold, and its shadow
+    # edges reach 0.6-0.7 of the background (at 0.7, KKT / P2144 outlines
+    # on the 15-10 caps had 11-30% such pixels per box); printed ink is
+    # darker, < 0.6 even on faint prints. At 0.6, components outside the
+    # print are mostly < 1%, the print's mostly > 10%, few in 2-7% either
+    # side. Without this the embossing beside a print joined its cluster,
+    # tilted the box and was read as a second line. 0 = off. (Ink colour
+    # does not separate them on this camera: B-(R+G)/2 is ~-1.5 on the
+    # print.)
+    # Used on a retry (ink_retry: engine.py, _retry_crops "ink_located"):
+    # a read that failed is retried on the print located with this ink
+    # filter, and every retry decides "does the crop hold a second line" on
+    # printed ink (font_reader.SECOND_LINE_MIN_PRINT_INK). ink_filter: the
+    # first locate too - off: its tighter, level crops read worse on 3
+    # test images the unfiltered locate reads correctly.
+    ink_dark_ratio: 0.6
+    ink_min_dark_fraction: 0.04
+    ink_filter: false
+    ink_retry: true
     # A cluster of components only counts as "the text" once it has at
     # least this many components (i.e. this many characters/dots found
     # close together) - filters out stray noise clusters.

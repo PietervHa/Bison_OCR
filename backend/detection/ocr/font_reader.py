@@ -75,6 +75,16 @@ def literal_class(ch):
 # fit only splits that line (ratio 1.00 on the fixture crops); on two-line
 # prints it was 1.21-1.57.
 SECOND_LINE_RATIO = 1.1
+# With PreparedCrop.print_ink_ratio set (OCRead's retries), only when that
+# second band holds printed ink: its ink darker than print_ink_ratio x the
+# plastic around it (PreparedCrop.band_print_ink) is at least this fraction
+# of the other band's. Moulded lettering beside a
+# one-line print ("P2144/1", "KKT") made a second band (ratio 1.11-1.35) of
+# relief shading: 0.00-0.04 on the test images. A printed line 2 is ink:
+# >= 0.62 on the 444 correctly read two-line prints, and 0.49-0.57 where
+# line 2 was printed with dots missing (those must stay NOK, not be read as
+# a one-line code).
+SECOND_LINE_MIN_PRINT_INK = 0.2
 # Character pitch searched by the cell grid, as a multiple of the band height.
 # The upper bound was 1.05: wider prints (e.g. an EXP line 2 with a 31 px
 # pitch on a 25 px band, 1.25) could not be fitted and got a grid squeezed
@@ -302,13 +312,20 @@ class PreparedCrop:
     so a read stops at most one step late (the longest, a grid fit, takes
     ~50-150 ms)."""
 
-    def __init__(self, crop, deadline=None):
+    def __init__(self, crop, deadline=None, print_ink_ratio=None):
         self.crop = crop
         self.deadline = deadline
+        # Set: a second band without printed ink (SECOND_LINE_MIN_PRINT_INK)
+        # is not a second line for a one-line template, which is then read
+        # on the printed ink alone (print_only). None: any second band
+        # refuses a one-line template.
+        self.print_ink_ratio = print_ink_ratio
+        self._print_only = None
         self.timings_ms = {}
         self._ink = None
         self._fit_ink, self._angles, self._rotated, self._bands, self._grids, self._cells = {}, {}, {}, {}, {}, {}
         self._sharpness = {}                            # per orientation: deskew angle -> sharpness
+        self._print_ink = {}
 
     def _timed(self, step, fn, *a, **k):
         if self.deadline is not None and time.perf_counter() > self.deadline:
@@ -359,6 +376,45 @@ class PreparedCrop:
         if len(template) == 1:
             seg["second_line"] = self._lines(flip, ang, 2)[0] > SECOND_LINE_RATIO * score
         return seg
+
+    def _print_mask(self):
+        """Pixels of printed ink: darker than print_ink_ratio x a
+        closing-based background (the locator's ink measure,
+        text_locator._ink_sums), dilated by 1 px - the threshold cuts the
+        blurred edge ring off each dot. Embossing is relief shading and is
+        not that dark; printed ink, even a line with dots missing, is."""
+        if None not in self._print_ink:
+            def mask():
+                gray = cv2.cvtColor(self.crop, cv2.COLOR_BGR2GRAY) if self.crop.ndim == 3 else self.crop
+                g = gray.astype(np.float32)
+                bg = cv2.morphologyEx(g, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+                m = (g < self.print_ink_ratio * bg).astype(np.uint8)
+                return cv2.dilate(m, np.ones((3, 3), np.uint8)).astype(np.float32)
+            self._print_ink[None] = self._timed("print_ink", mask)
+        return self._print_ink[None]
+
+    def band_print_ink(self, flip, ang):
+        """Printed ink (_print_mask) of the fit ink in the weaker of the two
+        bands of the two-line fit at deskew angle ang, as a fraction of the
+        stronger band's."""
+        if flip not in self._print_ink:
+            m = self.ink()[1] * self._print_mask()
+            self._print_ink[flip] = m[::-1, ::-1].copy() if flip else m
+        _, bands = self._lines(flip, ang, 2)
+        rot = _rotate(self._print_ink[flip], ang)
+        mass = [float(rot[y0:y1].sum()) for y0, y1 in bands]
+        return min(mass) / max(max(mass), 1e-9)
+
+    def print_only(self):
+        """The same crop with only its printed ink (_print_mask) in the ink
+        maps: for a one-line template whose second band is not print."""
+        if self._print_only is None:
+            m = self._print_mask()
+            boosted, raw = self.ink()
+            self._print_only = PreparedCrop(self.crop, self.deadline)
+            self._print_only._ink = (boosted * m, raw * m)
+            self._print_only.timings_ms = self.timings_ms
+        return self._print_only
 
     def cells(self, seg, flip):
         """cells_from() for a seg from segment(): each line's cells cut once."""
@@ -420,7 +476,10 @@ class FontReader:
         crop: the image, or a PreparedCrop of it to share the work between
         several templates read on the same crop (same results).
         None also when a one-line template is read on a crop that holds two
-        lines: that would be line 1 with line 2 ignored, not a reading."""
+        lines: that would be line 1 with line 2 ignored, not a reading. With
+        the crop's print_ink_ratio set, a second band without printed ink
+        (embossing beside the print) is not a second line: the one-line
+        template is read on the printed ink alone."""
         prep = crop if isinstance(crop, PreparedCrop) else PreparedCrop(crop)
         if (prep.crop is None or prep.crop.size == 0 or not self.supports(template)
                 or len(template) not in (1, 2)):
@@ -439,11 +498,21 @@ class FontReader:
             # Fast path: narrow angle search. If that read isn't clearly right,
             # redo it with the full +/-30 degree search (a wrong angle inside
             # the narrow range can otherwise win on a skewed crop).
+            src = prep
             for first_deg in (8.0, 30.0):
-                seg = prep.segment(template, flip, first_deg=first_deg)
+                seg = src.segment(template, flip, first_deg=first_deg)
                 if seg["second_line"]:
-                    return None                         # two lines; orientation doesn't change that
-                cells = prep.cells(seg, flip)
+                    if (src is not prep or prep.print_ink_ratio is None
+                            or prep.band_print_ink(flip, seg["angle"]) >= SECOND_LINE_MIN_PRINT_INK):
+                        return None                     # two lines; orientation doesn't change that
+                    # The second band is not print (embossing): from here on
+                    # this orientation is read on the printed ink alone -
+                    # unless that still holds two lines.
+                    src = prep.print_only()
+                    seg = src.segment(template, flip, first_deg=first_deg)
+                    if seg["second_line"]:
+                        return None
+                cells = src.cells(seg, flip)
                 if len(cells) != n_pos:
                     continue
                 tp = time.perf_counter()
