@@ -39,10 +39,16 @@ Matching rules - chosen so validation can reject, but never invent:
   - Every token used must have confidence >= min_confidence.
   - Optionally the canonical text must fully match value_pattern (e.g. a
     regex that also checks hours 00-23 and months 01-12).
+  - Optionally (max_expiry_years) the year of an expiry date - the "MM/YY"
+    after BB or EXP - must lie between this year and this year +
+    max_expiry_years (system date). "BB 05/38" read for 05/28 fits the
+    pattern and was read at digit confidence 0.999; only the date can
+    reject it. PROD (a production date) and line 1 are not checked.
 """
 
 from __future__ import annotations
 
+import datetime
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -70,6 +76,9 @@ REJECT_CONFIDENCE = "low_confidence"
 REJECT_VALUE = "invalid_value"
 REJECT_TIMEOUT = "timeout"
 
+# "BB 05/28", "EXP 05/28" in a canonical code: group 1 is the year YY.
+EXPIRY_DATE = re.compile(r"(?:^| )(?:BB|EXP) (?:\d{2})/(\d{2})(?= |$)")
+
 
 def normalize_token(text: str) -> str:
     """NFKC (full-width "：" -> ":"), and no whitespace inside a token."""
@@ -89,7 +98,7 @@ class _Match:
 
 class CodeTemplate:
     def __init__(self, lines, value_pattern=None, min_confidence=0.0,
-                 max_corrections=1, max_ignored_tokens=2):
+                 max_corrections=1, max_ignored_tokens=2, max_expiry_years=0, today=None):
         if isinstance(lines, str):
             lines = [lines]
         self.lines = [str(line) for line in lines if str(line).strip()]
@@ -105,6 +114,10 @@ class CodeTemplate:
         self.min_confidence = float(min_confidence)
         self.max_corrections = int(max_corrections)
         self.max_ignored_tokens = int(max_ignored_tokens)
+        # 0 = no expiry year check. today: a callable giving the date to
+        # check against (tests); None = the system date.
+        self.max_expiry_years = int(max_expiry_years or 0)
+        self.today = today or datetime.date.today
 
     @classmethod
     def from_config(cls, cfg: dict):
@@ -114,6 +127,7 @@ class CodeTemplate:
             min_confidence=cfg.get("min_confidence", 0.0),
             max_corrections=cfg.get("max_corrections", 1),
             max_ignored_tokens=cfg.get("max_ignored_tokens", 2),
+            max_expiry_years=cfg.get("max_expiry_years", 5),
         )
 
     @classmethod
@@ -243,6 +257,15 @@ class CodeTemplate:
             out.append(m[0]); corr += m[1]; lit += m[2]
         return "".join(out), corr, lit
 
+    def _expiry_year_ok(self, canonical) -> bool:
+        """Every expiry year YY in the code within this year .. this year +
+        max_expiry_years (two-digit years, so 99 -> 00 wraps)."""
+        if self.max_expiry_years <= 0:
+            return True
+        this_year = self.today().year % 100
+        return all((int(yy) - this_year) % 100 <= self.max_expiry_years
+                   for yy in EXPIRY_DATE.findall(canonical))
+
     def validate(self, candidates) -> dict:
         tokens = [(normalize_token(c.get("text", "")), float(c.get("confidence", 0.0)))
                   for c in candidates or []]
@@ -269,5 +292,7 @@ class CodeTemplate:
         if min(best.used_confidences) < self.min_confidence:
             return dict(info, reason=REJECT_CONFIDENCE)
         if self.value_pattern and not self.value_pattern.fullmatch(canonical):
+            return dict(info, reason=REJECT_VALUE)
+        if not self._expiry_year_ok(canonical):
             return dict(info, reason=REJECT_VALUE)
         return dict(info, accepted=True, reason=None)

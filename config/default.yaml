@@ -44,11 +44,14 @@ ocr:
       # Rejects garbled cuts / wrong orientation; -2.0..-1.0 all gave the
       # same result on the real frames.
       min_literal_score: -1.0
-      # Every digit at least this confident. 0.0 = most correct reads
-      # (73/6/4 on unseen bottles); 0.5 = fewer wrong reads (58/1/24).
-      # Wrong reads still end as NOK at the PLC, which compares with the
-      # expected code.
-      min_digit_confidence: 0.0
+      # Every digit at least this confident. Calibrated on the 514 test
+      # images: the lowest wrong read accepted at 0.0 had 0.632 ("06:20"
+      # for 06:27), the next correct read 0.745; 0.7 sits in that gap and
+      # costs one correct read (at 0.192). Higher values only cost more
+      # correct reads (0.8: 2, 0.9: 3, 0.95: 5) and catch no more wrong
+      # ones. (Earlier, on unseen bottles: 0.0 = 73 correct / 6 wrong / 4
+      # rejected, 0.5 = 58/1/24.)
+      min_digit_confidence: 0.7
     # The print formats the line uses; each is a list with one entry per
     # printed line. # = digit, A = letter, * = any character, space = gap
     # between fields, anything else must be printed literally.
@@ -68,6 +71,11 @@ ocr:
     # Optional regex the canonical code must fully match (value sanity:
     # hour 00-23, minute 00-59, month 01-12), for all formats. '' to disable.
     value_pattern: '^\d{4} ([01]\d|2[0-3]):[0-5]\d( (BB|EXP|PROD) (0[1-9]|1[0-2])/\d{2})?$'
+    # The year YY of an expiry date (BB / EXP MM/YY) must lie between this
+    # year and this year + max_expiry_years (system date), else NOK
+    # invalid_value: "BB 05/38" read for 05/28 fits value_pattern and was
+    # read at digit confidence 0.999. PROD dates are not checked. 0 = off.
+    max_expiry_years: 5
     # Template matching settings (code_validator.py). The font reader's
     # lines are checked at confidence 1.0, so min_confidence never rejects
     # them; its own gates are min_literal_score / min_digit_confidence above.
