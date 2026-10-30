@@ -23,6 +23,7 @@ import time
 from backend.core.config_loader import cfg
 from backend.utils.logger import setup_logging, get_logger, UVICORN_LOG_CONFIG
 from backend.output.result_writer import save_result
+from backend.utils.priority import set_process_priority
 
 log = get_logger(__name__)
 _vision_busy = threading.Event()
@@ -174,6 +175,9 @@ def main():
     Sets up logging, application state, camera, web server, and TCP trigger server.
     """
     setup_logging()
+    priority = (cfg.get("performance") or {}).get("process_priority", "normal")
+    if set_process_priority(priority):
+        log.info("Process priority: %s", priority)
     app_state = AppState()
     bind_app_state(app_state)
 

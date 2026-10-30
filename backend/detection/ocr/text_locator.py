@@ -133,11 +133,15 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     # same pixels), but that's a small, local loss compared to the
     # alternative of the rib dominating the whole cluster selection.
     unerased_mask = dark_mask
+    # Every erasure below (and in _grow_over_print) starts from this same
+    # mask: its Hough lines and their ink runs are found once per frame.
+    hough = {}
     if dyn_cfg.get("reject_long_lines", True):
         dark_mask = _erase_long_lines(
             dark_mask,
             min_length=int(dyn_cfg.get("long_line_min_length_px", 90)),
             thickness=int(dyn_cfg.get("long_line_erase_thickness_px", 6)),
+            hough=hough,
         )
 
     # Small closing to merge dot-matrix fragments belonging to the same
@@ -214,6 +218,7 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
             min_length=int(dyn_cfg.get("long_line_min_length_px", 90)),
             thickness=int(dyn_cfg.get("long_line_erase_thickness_px", 6)),
             min_solid_run=min_solid,
+            hough=hough,
         )
         closed, labels, boxes, label_ids, areas = components(dark_mask)
         cluster = _largest_proximity_cluster(boxes, areas, max_gap=seed_gap)
@@ -282,7 +287,7 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     grown = None
     if dyn_cfg.get("grow_over_print", False):
         grown = _grow_over_print(np.isin(labels, cluster_label_ids), unerased_mask, close_kernel, dyn_cfg,
-                                 ink_sums if min_ink > 0 else None)
+                                 ink_sums if min_ink > 0 else None, hough)
         gy, gx = np.nonzero(grown)
         xs1, ys1 = min(xs1, int(gx.min())), min(ys1, int(gy.min()))
         xs2, ys2 = max(xs2, int(gx.max()) + 1), max(ys2, int(gy.max()) + 1)
@@ -641,7 +646,7 @@ def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0
 
 
 def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np.ndarray, dyn_cfg: dict,
-                     ink_sums: Optional[np.ndarray] = None) -> np.ndarray:
+                     ink_sums: Optional[np.ndarray] = None, hough: Optional[dict] = None) -> np.ndarray:
     """
     cluster_ink plus the blobs of the ink mask chained to it, in a mask
     where only real ribs are erased.
@@ -667,6 +672,7 @@ def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np
             min_length=int(dyn_cfg.get("long_line_min_length_px", 90)),
             thickness=int(dyn_cfg.get("long_line_erase_thickness_px", 6)),
             min_solid_run=int(dyn_cfg.get("grow_rib_min_solid_px", 40)),
+            hough=hough,
         )
     closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
     _n, labels, stats, _c = cv2.connectedComponentsWithStats(closed, connectivity=8)
@@ -837,7 +843,7 @@ def _proximity_clusters(boxes: list, areas: list, max_gap: float) -> list:
 
 
 def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6,
-                      min_solid_run: int = 0) -> np.ndarray:
+                      min_solid_run: int = 0, hough: Optional[dict] = None) -> np.ndarray:
     """Detect and blank out long straight line segments in a binary mask.
 
     Used to strip a bottle cap's molded ribs out of the ink mask before
@@ -863,16 +869,31 @@ def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6
     most of the print out of the mask (the locator then cropped only a few
     characters: single-line, PROD and EXP prints). A rib is one continuous
     stroke; a text row breaks at every character gap.
+
+    hough: a dict the caller keeps per mask (always the same mask): the
+    Hough lines and each line's longest ink run are then found once for
+    every erasure of it (same result as without).
     """
-    lines = cv2.HoughLinesP(mask, 1, np.pi / 180, threshold=60, minLineLength=30, maxLineGap=15)
+    hough = {} if hough is None else hough
+    if "lines" not in hough:
+        hough["lines"] = cv2.HoughLinesP(mask, 1, np.pi / 180, threshold=60, minLineLength=30, maxLineGap=15)
+        hough["runs"] = {}
+    lines = hough["lines"]
     if lines is None:
         return mask
     out = mask.copy()
     for line in lines:
         x1, y1, x2, y2 = line[0]
         length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-        if length >= min_length and (min_solid_run <= 0 or _longest_ink_run(mask, x1, y1, x2, y2) >= min_solid_run):
-            cv2.line(out, (x1, y1), (x2, y2), 0, thickness=thickness)
+        if length < min_length:
+            continue
+        if min_solid_run > 0:
+            key = (int(x1), int(y1), int(x2), int(y2))
+            if key not in hough["runs"]:
+                hough["runs"][key] = _longest_ink_run(mask, x1, y1, x2, y2)
+            if hough["runs"][key] < min_solid_run:
+                continue
+        cv2.line(out, (x1, y1), (x2, y2), 0, thickness=thickness)
     return out
 
 

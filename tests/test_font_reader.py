@@ -429,6 +429,26 @@ class OCReadEmbossingTests(unittest.TestCase):
             e.row_angle_retry, e.crop_retry = True, True
 
 
+class SharedGridTermsTests(unittest.TestCase):
+    """_fit_cells with the per-cell terms shared between the templates of one
+    band (as PreparedCrop does for BB / EXP / PROD line 2) gives the same
+    grids as each template on its own - also when a template with fewer
+    cells (a wider offset grid) comes after one with more."""
+
+    def test_same_grids_as_unshared(self):
+        from backend.detection.ocr import font_reader as fr
+        for name in ("4113_rib_through_6.png", "3030_crossing_ribs.png", "4113_upside_down.png"):
+            raw = fr.ink_maps(cv2.imread(str(FIX / name)))[1]
+            f = fr._rotate(raw, fr._deskew(raw))
+            _, bands = fr._fit_lines(f, 2)
+            near = fr.line_pitch(fr._fit_cells(f, bands[0], "#### ##:##"))
+            for order in (("BB ##/##", "EXP ##/##", "PROD ##/##"), ("PROD ##/##", "EXP ##/##", "BB ##/##")):
+                shared = {}
+                for tl in order:
+                    self.assertEqual(fr._fit_cells(f, bands[1], tl, near, shared), fr._fit_cells(f, bands[1], tl, near),
+                                     f"{name} {tl} after {order}")
+
+
 class OCReadFormatSelectionTests(unittest.TestCase):
     def _engine(self, results, formats=ALL_FORMATS, skipped=()):
         from backend.detection.ocread import engine

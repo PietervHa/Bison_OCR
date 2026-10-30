@@ -33,6 +33,9 @@ def create_app(camera, app_state, start_cycle=None) -> FastAPI:
 
     # 15 fps is plenty for the HMI preview and halves the encode work of 30.
     STREAM_FPS = float(cfg.get("hmi", {}).get("stream_fps", 15))
+    # Scale of the preview frame (1 = camera size). The stream shares the CPU
+    # with the read cycle: at 15 fps and full size it cost ~14% of a core.
+    STREAM_SCALE = float(cfg.get("hmi", {}).get("stream_scale", 1.0))
     FRAME_INTERVAL_S = 1.0 / STREAM_FPS
     open_streams = [0]  # mutated only on the event loop thread
 
@@ -49,7 +52,11 @@ def create_app(camera, app_state, start_cycle=None) -> FastAPI:
 
     def _grab_and_encode():
         frame = camera.get_frame()
-        return None if frame is None else _encode(frame)
+        if frame is None:
+            return None
+        if 0 < STREAM_SCALE < 1:
+            frame = cv2.resize(frame, None, fx=STREAM_SCALE, fy=STREAM_SCALE, interpolation=cv2.INTER_AREA)
+        return _encode(frame)
 
     async def generate_frames(client):
         # Async generator: on client disconnect Starlette cancels the response

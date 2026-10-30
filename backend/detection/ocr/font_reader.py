@@ -167,24 +167,67 @@ def _layouts(template_line):
     return out
 
 
-def _fit_cells(fit, band, template_line, near_pitch=None):
-    """Best fixed-pitch grid for one line: (score, (labels, [(x0, x1), ...])).
-    near_pitch: line 1's pitch (px) - this line's pitch is then searched
-    within LINE_PITCH_TOLERANCE of it instead of PITCH_RANGE alone."""
-    y0, y1 = band; h = max(1, y1 - y0)
-    p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
-    if near_pitch:
-        p_lo = max(p_lo, near_pitch / LINE_PITCH_TOLERANCE)
-        p_hi = min(p_hi, near_pitch * LINE_PITCH_TOLERANCE)
-        if p_lo >= p_hi:                                # no overlap: search the plain range
-            p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
-    col = fit[y0:y1].sum(axis=0) / h; W = len(col)
-    cs = np.r_[0.0, np.cumsum(col)]
+class _GridTerms:
+    """The template-independent part of _fit_cells for one band of one fit
+    image (and line 1's pitch): the pitches and offsets searched, and per
+    cell index k the core / edge means of cell k at every (pitch, offset),
+    plus the left / right margin terms. Line 2 of BB, EXP and PROD is
+    fitted on the same band: with the terms shared, each cell's means are
+    computed once instead of once per format (_fit_cells was half of a
+    first read). k_min: the offsets are those of the grid with k_min cells
+    - a superset of every grid with more cells (same start and step, a
+    later stop), so a template with at least k_min cells takes its own
+    columns of them and gets the same numbers as on its own grid."""
 
-    def mean(a, b):
+    def __init__(self, fit, band, near_pitch, k_min):
+        y0, y1 = band; h = max(1, y1 - y0)
+        p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
+        if near_pitch:
+            p_lo = max(p_lo, near_pitch / LINE_PITCH_TOLERANCE)
+            p_hi = min(p_hi, near_pitch * LINE_PITCH_TOLERANCE)
+            if p_lo >= p_hi:                            # no overlap: search the plain range
+                p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
+        col = fit[y0:y1].sum(axis=0) / h
+        self.W = len(col)
+        self.cs = np.r_[0.0, np.cumsum(col)]
+        self.ps = np.arange(p_lo, p_hi, 0.25)
+        self.k_min = k_min
+        self.core, self.edge, self.left, self.right = [], [], None, {}
+        if not len(self.ps):
+            return
+        rows = [np.arange(-0.5 * p, self.W - k_min * p * 0.8, 0.5) for p in self.ps]
+        self.x0 = np.zeros((len(self.ps), max(len(r) for r in rows)))
+        for r, xs in enumerate(rows):
+            self.x0[r, :len(xs)] = xs
+        self.p = self.ps[:, None]
+
+    def mean(self, a, b):
+        W, cs = self.W, self.cs
         a = np.clip(np.round(a).astype(int), 0, W); b = np.clip(np.round(b).astype(int), 0, W)
         return np.where(b > a, (cs[b] - cs[a]) / np.maximum(1, b - a), 0.0)
 
+    def cells(self, K):
+        """core, edge (lists of per-cell arrays, at least K long), left and
+        right (the K-cell grid's) margin terms."""
+        x0, p = self.x0, self.p
+        while len(self.core) < K:
+            a = x0 + len(self.core) * p
+            self.core.append(self.mean(a + 0.15 * p, a + 0.85 * p))
+            self.edge.append(self.mean(a - 0.08 * p, a + 0.08 * p))
+        if self.left is None:
+            self.left = self.mean(x0 - p, x0)
+        if K not in self.right:
+            self.right[K] = self.mean(x0 + K * p, x0 + (K + 1) * p)
+        return self.core, self.edge, self.left, self.right[K]
+
+
+def _fit_cells(fit, band, template_line, near_pitch=None, shared=None):
+    """Best fixed-pitch grid for one line: (score, (labels, [(x0, x1), ...])).
+    near_pitch: line 1's pitch (px) - this line's pitch is then searched
+    within LINE_PITCH_TOLERANCE of it instead of PITCH_RANGE alone.
+    shared: a dict kept per (fit, band, near_pitch) by the caller, holding
+    the _GridTerms that several templates fitted on that band share (same
+    result as without)."""
     # All pitches at once: row r = pitch ps[r], column j = offset x0 (each
     # pitch has its own offsets, padded with NaN). The score per (pitch,
     # offset) is computed element by element exactly as one pitch at a time,
@@ -195,19 +238,18 @@ def _fit_cells(fit, band, template_line, near_pitch=None):
     # layout's offsets are a prefix of those of the layout with the fewest
     # cells (same start and step, earlier stop). So the offsets and each
     # cell's core/edge means are computed once on the widest grid and each
-    # layout uses its own columns of them.
-    ps = np.arange(p_lo, p_hi, 0.25)
+    # layout uses its own columns of them (_GridTerms).
     layouts = _layouts(template_line)
+    k_min = min(len(cells) for cells, _ in layouts)
+    terms = shared.get("terms") if shared is not None else None
+    if terms is None or terms.k_min > k_min:
+        terms = _GridTerms(fit, band, near_pitch, k_min)
+        if shared is not None:
+            shared["terms"] = terms
+    ps, W = terms.ps, terms.W
     if not len(ps):
         return (-1e18, None)
-    k_min = min(len(cells) for cells, _ in layouts)
-    rows = [np.arange(-0.5 * p, W - k_min * p * 0.8, 0.5) for p in ps]
-    x0 = np.zeros((len(ps), max(len(r) for r in rows)))
-    for r, xs in enumerate(rows):
-        x0[r, :len(xs)] = xs
-    p = ps[:, None]
-    core, edge = [], []                                 # per cell index k, computed on first use
-    left = None
+    x0 = terms.x0
     best = (-1e18, None)
     for cells, labels in layouts:
         K = len(cells)
@@ -216,18 +258,12 @@ def _fit_cells(fit, band, template_line, near_pitch=None):
         if n == 0:
             continue
         valid = np.arange(n)[None, :] < lens[:, None]
-        while len(core) < K:
-            a = x0 + len(core) * p
-            core.append(mean(a + 0.15 * p, a + 0.85 * p))
-            edge.append(mean(a - 0.08 * p, a + 0.08 * p))
-        if left is None:
-            left = mean(x0 - p, x0)
-        xv = x0[:, :n]
-        s = np.zeros_like(xv)
+        core, edge, left, right = terms.cells(K)
+        s = np.zeros_like(x0[:, :n])
         for k, kind in enumerate(cells):
             s += core[k][:, :n] if kind == "G" else -2.0 * core[k][:, :n]
             s -= 0.5 * edge[k][:, :n]
-        s -= 2.0 * (left[:, :n] + mean(xv + K * p, xv + (K + 1) * p))
+        s -= 2.0 * (left[:, :n] + right[:, :n])
         s /= K
         s[~valid] = -np.inf
         r, i = np.unravel_index(int(np.argmax(s)), s.shape)
@@ -302,7 +338,9 @@ class PreparedCrop:
     (+/-8, +/-30 deg; a search that lands on an angle already seen shares
     everything after it) and the sharpness per angle tried (the two searches
     overlap); per angle the line bands per number of lines; per
-    band the cell grid per (template line, line 1's pitch) and its cells.
+    band the cell grid per (template line, line 1's pitch) and its cells,
+    and the per-cell terms of the grid search the templates share
+    (_GridTerms).
     Same results as segment() / cells_from() on the crop's ink maps.
 
     timings_ms: time per step summed over all reads of this crop (ink,
@@ -325,6 +363,7 @@ class PreparedCrop:
         self._ink = None
         self._fit_ink, self._angles, self._rotated, self._bands, self._grids, self._cells = {}, {}, {}, {}, {}, {}
         self._sharpness = {}                            # per orientation: deskew angle -> sharpness
+        self._grid_terms = {}                           # per (flip, angle, band, line 1's pitch): _fit_cells' shared terms
         self._print_ink = {}
 
     def _timed(self, step, fn, *a, **k):
@@ -367,9 +406,12 @@ class PreparedCrop:
         score, bands = self._lines(flip, ang, len(template))
         fits = []
         for band, tl in zip(bands, template):
-            key = (flip, ang, band, tl, line_pitch(fits[0]) if fits else None)
+            near = line_pitch(fits[0]) if fits else None
+            key = (flip, ang, band, tl, near)
             if key not in self._grids:
-                self._grids[key] = self._timed("cell_fit", _fit_cells, f, band, tl, key[-1])
+                # The templates fitted on this band share their per-cell terms.
+                shared = self._grid_terms.setdefault((flip, ang, band, near), {})
+                self._grids[key] = self._timed("cell_fit", _fit_cells, f, band, tl, near, shared)
             fits.append(self._grids[key])
         seg = {"angle": ang, "bands": bands, "lines": [g for _, g in fits],
                "line_fit": [s for s, _ in fits], "second_line": False}

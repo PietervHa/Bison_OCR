@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from backend.detection.ocr.text_locator import (
+    _erase_long_lines,
     _ink_fraction,
     _ink_sums,
     _largest_proximity_cluster,
@@ -154,6 +155,21 @@ class DeskewOrientationTests(unittest.TestCase):
                 continue
             crop = deskew_crop(frame, loc["rotated_rect"], extra_padding_px=20)
             self.assertTrue(_is_upright(crop), f"crop upside-down at tilt {theta}")
+
+
+class HoughCacheTests(unittest.TestCase):
+    def test_shared_lines_erase_the_same(self):
+        # One Hough search per mask, shared by its erasures (the locator does
+        # three per frame): the same result as a fresh search each time.
+        gray = cv2.cvtColor(_frame_with_tilt(20), cv2.COLOR_BGR2GRAY)
+        cv2.line(gray, (50, 400), (700, 300), 60, 4)            # a rib
+        bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+        mask = ((bh > 32) * 255).astype(np.uint8)
+        hough = {}
+        for solid in (0, 40, 0, 40):
+            self.assertTrue(np.array_equal(_erase_long_lines(mask, 60, 6, solid, hough=hough),
+                                           _erase_long_lines(mask, 60, 6, solid)))
+        self.assertIn("lines", hough)
 
 
 class SolidLineRetryTests(unittest.TestCase):

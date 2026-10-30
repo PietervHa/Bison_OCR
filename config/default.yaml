@@ -350,6 +350,24 @@ camera:
 # HMI settings
 hmi:
   enable_video_feed: true
+  # Preview stream on the HMI: frames per second, JPEG quality and scale
+  # (0.5 = half width and height). At 15 fps and full size one stream cost
+  # ~14% of a core (744x408, 23 kB per frame).
+  stream_fps: 10
+  stream_quality: 75
+  stream_scale: 0.5
+
+# Keeping the read cycle steady while other programs use the PC (measured:
+# a ~300 ms first read took 1.0-1.5 s while another program used 3-4 cores).
+performance:
+  # Windows priority of the app process (normal / above_normal / high) and
+  # of the vision thread (normal / above_normal / highest). Elsewhere: no-op.
+  process_priority: above_normal
+  vision_thread_priority: highest
+  # OpenCV worker threads (cv2.setNumThreads): 1 runs every vision step on
+  # the vision thread itself, at its priority; the same speed as 8 on these
+  # small crops when the PC is quiet. Unset = OpenCV's default (all cores).
+  cv_threads: 1
 
 # Web settings
 web:

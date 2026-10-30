@@ -73,6 +73,14 @@ class OCRead:
     """
     def __init__(self):
         ocr_cfg = cfg["ocr"]
+        # OpenCV's own worker threads (performance.cv_threads): on these
+        # small crops 1-8 threads read equally fast, but with more than one
+        # every parallel call waits for its slowest worker - under load a
+        # busy core stalled the read - and the workers don't run at the
+        # vision thread's priority. Process-wide; None = OpenCV's default.
+        cv_threads = (cfg.get("performance") or {}).get("cv_threads")
+        if cv_threads is not None:
+            cv2.setNumThreads(int(cv_threads))
         self.downscale = float(ocr_cfg["downscale"])
         self.min_dim = int(ocr_cfg["min_dim"])
 
