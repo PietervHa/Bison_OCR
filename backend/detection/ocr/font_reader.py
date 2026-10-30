@@ -188,7 +188,7 @@ class _GridTerms:
     later stop), so a template with at least k_min cells takes its own
     columns of them and gets the same numbers as on its own grid."""
 
-    def __init__(self, fit, band, near_pitch, k_min):
+    def __init__(self, fit, band, near_pitch, k_min, coarse=GRID_COARSE):
         y0, y1 = band; h = max(1, y1 - y0)
         p_lo, p_hi = PITCH_RANGE[0] * h, PITCH_RANGE[1] * h
         if near_pitch:
@@ -201,6 +201,7 @@ class _GridTerms:
         self.cs = np.r_[0.0, np.cumsum(col)]
         self.ps = np.arange(p_lo, p_hi, 0.25)
         self.k_min = k_min
+        self.coarse = coarse
         self.core, self.edge, self.left, self.right = [], [], None, {}
         if not len(self.ps):
             return
@@ -209,13 +210,19 @@ class _GridTerms:
         for r, xs in enumerate(rows):
             self.x0[r, :len(xs)] = xs
         # The coarse pass's (pitch, offset) grid: every GRID_COARSE-th of each.
-        cp, cx = GRID_COARSE
+        cp, cx = coarse
         self.xc, self.pc = self.x0[::cp, ::cx], self.ps[::cp, None]
 
     def mean(self, a, b):
+        """Mean of the column profile over [round(a), round(b)) per element
+        (0 for an empty range: b >= a always holds here, and cs[a] - cs[a]
+        is 0). np.maximum / np.minimum instead of np.clip / np.where: the
+        same numbers without their Python-level overhead (this was a third
+        of a read)."""
         W, cs = self.W, self.cs
-        a = np.clip(np.round(a).astype(int), 0, W); b = np.clip(np.round(b).astype(int), 0, W)
-        return np.where(b > a, (cs[b] - cs[a]) / np.maximum(1, b - a), 0.0)
+        a = np.rint(a).astype(np.intp); np.maximum(a, 0, out=a); np.minimum(a, W, out=a)
+        b = np.rint(b).astype(np.intp); np.maximum(b, 0, out=b); np.minimum(b, W, out=b)
+        return (cs[b] - cs[a]) / np.maximum(1, b - a)
 
     def score(self, cells, r, i):
         """Grid score of the layout `cells` at full-resolution pitch rows r
@@ -245,13 +252,14 @@ class _GridTerms:
         return self.core, self.edge, self.left, self.right[K]
 
 
-def _fit_cells(fit, band, template_line, near_pitch=None, shared=None):
+def _fit_cells(fit, band, template_line, near_pitch=None, shared=None, coarse=GRID_COARSE, refine=GRID_REFINE):
     """Best fixed-pitch grid for one line: (score, (labels, [(x0, x1), ...])).
     near_pitch: line 1's pitch (px) - this line's pitch is then searched
     within LINE_PITCH_TOLERANCE of it instead of PITCH_RANGE alone.
     shared: a dict kept per (fit, band, near_pitch) by the caller, holding
     the _GridTerms that several templates fitted on that band share (same
-    result as without)."""
+    result as without). coarse, refine: the coarse-to-fine search's steps
+    (GRID_COARSE, GRID_REFINE; speed options grid_coarse, grid_refine)."""
     # All pitches at once: row r = pitch ps[r], column j = offset x0 (each
     # pitch has its own offsets, padded). Coarse to fine: the score is
     # computed on every GRID_COARSE-th pitch and offset, then at full
@@ -268,15 +276,15 @@ def _fit_cells(fit, band, template_line, near_pitch=None, shared=None):
     layouts = _layouts(template_line)
     k_min = min(len(cells) for cells, _ in layouts)
     terms = shared.get("terms") if shared is not None else None
-    if terms is None or terms.k_min > k_min:
-        terms = _GridTerms(fit, band, near_pitch, k_min)
+    if terms is None or terms.k_min > k_min or terms.coarse != tuple(coarse):
+        terms = _GridTerms(fit, band, near_pitch, k_min, tuple(coarse))
         if shared is not None:
             shared["terms"] = terms
     ps, W = terms.ps, terms.W
     if not len(ps):
         return (-1e18, None)
     x0 = terms.x0
-    cp, cx = GRID_COARSE
+    cp, cx = terms.coarse
     best = (-1e18, None)
     for cells, labels in layouts:
         K = len(cells)
@@ -295,7 +303,7 @@ def _fit_cells(fit, band, template_line, near_pitch=None, shared=None):
         s -= 2.0 * (left[:, :nc] + right[:, :nc])
         s /= K
         s[~valid[::cp, ::cx]] = -np.inf
-        top = np.argsort(-s, axis=None, kind="stable")[:GRID_REFINE]
+        top = np.argsort(-s, axis=None, kind="stable")[:refine]
         top = top[np.isfinite(s.ravel()[top])]
         if not len(top):
             continue
@@ -323,10 +331,12 @@ def line_pitch(fit):
     return cells[1][0] - cells[0][0] if len(cells) > 1 else None
 
 
-def ink_maps(crop):
-    """(boosted ink for the classifier, un-boosted ink for fitting the grid), 0..1."""
+def ink_maps(crop, line_scale=1.0, threads=1):
+    """(boosted ink for the classifier, un-boosted ink for fitting the grid), 0..1.
+    line_scale, threads: dot_text's (speed options ink_line_scale, ink_threads)."""
     dbg = {}
-    out = clean_dot_text(crop, {"upscale": 1, "illumination": "divide"}, debug=dbg)
+    out = clean_dot_text(crop, {"upscale": 1, "illumination": "divide", "line_scale": line_scale, "threads": threads},
+                         debug=dbg)
     boosted = (255.0 - out[..., 0].astype(np.float32)) / 225.0
     raw = dbg["text_ink"]
     raw = np.clip(raw / max(1e-6, float(np.percentile(raw, 99.5))), 0, 1).astype(np.float32)
@@ -396,9 +406,12 @@ class PreparedCrop:
     so a read stops at most one step late (the longest, a grid fit, takes
     ~50-150 ms)."""
 
-    def __init__(self, crop, deadline=None, print_ink_ratio=None):
+    def __init__(self, crop, deadline=None, print_ink_ratio=None, speed=None):
         self.crop = crop
         self.deadline = deadline
+        # Speed options (ocr.speed in config/default.yaml); None or a
+        # missing key = off: the read as without them.
+        self.speed = dict(speed or {})
         # Set: a second band without printed ink (SECOND_LINE_MIN_PRINT_INK)
         # is not a second line for a one-line template, which is then read
         # on the printed ink alone (print_only). None: any second band
@@ -423,7 +436,8 @@ class PreparedCrop:
     def ink(self):
         """(boosted, raw) from ink_maps(), computed on first use."""
         if self._ink is None:
-            self._ink = self._timed("ink", ink_maps, self.crop)
+            self._ink = self._timed("ink", ink_maps, self.crop, float(self.speed.get("ink_line_scale", 1.0)),
+                                    int(self.speed.get("ink_threads", 1)))
         return self._ink
 
     def _rot(self, which, flip, ang):
@@ -455,9 +469,21 @@ class PreparedCrop:
         same for both orientations - turning the crop 180 degrees keeps the
         print's angle - so it is searched once, on the upright ink."""
         if first_deg not in self._angles:
-            self._angles[first_deg] = self._timed("deskew", _deskew, self.ink()[1], first_deg=first_deg,
+            self._angles[first_deg] = self._timed("deskew", _deskew, self._deskew_ink(), first_deg=first_deg,
                                                   cache=self._sharpness)
         return self._angles[first_deg]
+
+    def _deskew_ink(self):
+        """The fit ink the angle is searched on: speed option deskew_scale
+        < 1 scales it down (INTER_AREA) - a rotation per angle tried on a
+        quarter of the pixels at 0.5; the angles tried are the same."""
+        scale = float(self.speed.get("deskew_scale", 1.0))
+        raw = self.ink()[1]
+        if scale >= 1.0:
+            return raw
+        if "deskew" not in self._rotated:
+            self._rotated["deskew"] = cv2.resize(raw, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        return self._rotated["deskew"]
 
     def segment(self, template, flip, first_deg=8.0):
         """segment() of the crop's fit ink, flipped 180 degrees or not. The
@@ -474,7 +500,9 @@ class PreparedCrop:
             if key not in self._grids:
                 # The templates fitted on this band share their per-cell terms.
                 shared = self._grid_terms.setdefault((flip, ang, band, near), {})
-                self._grids[key] = self._timed("cell_fit", _fit_cells, f, band, tl, near, shared)
+                self._grids[key] = self._timed("cell_fit", _fit_cells, f, band, tl, near, shared,
+                                               tuple(self.speed.get("grid_coarse", GRID_COARSE)),
+                                               int(self.speed.get("grid_refine", GRID_REFINE)))
             fits.append(self._grids[key])
         seg = {"angle": ang, "bands": bands, "lines": [g for _, g in fits],
                "line_fit": [s for s, _ in fits], "second_line": False}
@@ -516,7 +544,7 @@ class PreparedCrop:
         if self._print_only is None:
             m = self._print_mask()
             boosted, raw = self.ink()
-            self._print_only = PreparedCrop(self.crop, self.deadline)
+            self._print_only = PreparedCrop(self.crop, self.deadline, speed=self.speed)
             self._print_only._ink = (boosted * m, raw * m)
             self._print_only.timings_ms = self.timings_ms
         return self._print_only
@@ -595,21 +623,29 @@ class FontReader:
         timings["ink_ms"] = round((time.perf_counter() - t0) * 1000, 1)   # 0 once the crop's ink is shared
         n_pos = sum(1 for line in template for ch in line if ch != " ")
         best = None
-        for flip in (False, True):
-            if (flip and best is not None and self.early_exit_literal is not None
-                    and best["literal_score"] >= self.early_exit_literal):
-                break                                   # upright read is clearly right
+        # Passes (orientation, angle search): the narrow search first; if
+        # that read isn't clearly right, the same orientation with the full
+        # +/-30 degree search (a wrong angle inside the narrow range can
+        # otherwise win on a skewed crop), then the crop turned 180 degrees.
+        # speed "orientation_first": both orientations with the narrow search
+        # before any +/-30 search - an upside-down print is then read without
+        # the wide search. A +/-30 search that lands on the narrow search's
+        # angle (the same in both orientations, PreparedCrop.angle) would
+        # read the same segment again and is skipped. Stops at the first
+        # clearly right read.
+        if prep.speed.get("orientation_first"):
+            passes = [(flip, deg) for deg in (8.0, 30.0) for flip in (False, True)]
+        else:
+            passes = [(flip, deg) for flip in (False, True) for deg in (8.0, 30.0)]
+        srcs = {False: prep, True: prep}
+        for flip, first_deg in passes:
+            if best is not None and self.early_exit_literal is not None and best["literal_score"] >= self.early_exit_literal:
+                break                                   # clearly right
+            src = srcs[flip]
+            if first_deg != 8.0 and src.angle(first_deg) == src.angle(8.0):
+                continue
             ts = time.perf_counter()
-            # Fast path: narrow angle search. If that read isn't clearly right,
-            # redo it with the full +/-30 degree search (a wrong angle inside
-            # the narrow range can otherwise win on a skewed crop).
-            # The angle is the same in both orientations (PreparedCrop.angle):
-            # a +/-30 search that lands on the narrow search's angle would read
-            # the same segment again and is skipped.
-            src = prep
-            for first_deg in (8.0, 30.0):
-                if first_deg != 8.0 and src.angle(first_deg) == src.angle(8.0):
-                    break
+            try:
                 seg = src.segment(template, flip, first_deg=first_deg)
                 if seg["second_line"]:
                     if (src is not prep or prep.print_ink_ratio is None
@@ -618,10 +654,12 @@ class FontReader:
                     # The second band is not print (embossing): from here on
                     # this orientation is read on the printed ink alone -
                     # unless that still holds two lines.
-                    src = prep.print_only()
+                    src = srcs[flip] = prep.print_only()
                     seg = src.segment(template, flip, first_deg=first_deg)
                     if seg["second_line"]:
                         return None
+                if any(line is None for line in seg["lines"]):
+                    continue                            # no cell grid fits a line (e.g. a band too small)
                 cells = src.cells(seg, flip)
                 if len(cells) != n_pos:
                     continue
@@ -631,9 +669,9 @@ class FontReader:
                 if best is None or lit > best["literal_score"]:
                     best = {"lines": lines, "literal_score": round(lit, 3), "confidence": round(conf, 3),
                             "flipped": flip, "angle": seg["angle"]}
-                if self.early_exit_literal is None or lit >= self.early_exit_literal:
-                    break
-            timings["grid_down_ms" if flip else "grid_up_ms"] = round((time.perf_counter() - ts) * 1000, 1)
+            finally:
+                key = "grid_down_ms" if flip else "grid_up_ms"
+                timings[key] = round(timings.get(key, 0.0) + (time.perf_counter() - ts) * 1000, 1)
         timings["total_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         if best is None:
             return None

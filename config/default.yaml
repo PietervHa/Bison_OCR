@@ -14,6 +14,44 @@ ocr:
   downscale: 0.6
   min_dim: 480
 
+  # Speed options of the read (engine.py, font_reader.py, dot_text.py),
+  # each one on its own switch: false / 1.0 = off, the read as without it.
+  # Measured on the 514 test images; see the comment per option.
+  speed:
+    # Read the crop turned 180 degrees with the narrow (+/-8 deg) angle
+    # search before any +/-30 deg search: an upside-down print no longer
+    # pays for a wide search on the upright read first.
+    orientation_first: true
+    # Run dot_text's 36 long-line openings (the ink map, ~85% of its time)
+    # on this many threads (backend/utils/workers.py, at the vision
+    # thread's priority). Bit-identical result. 1 = serial.
+    ink_threads: 4
+    # Find the long lines on the ink map scaled by this factor (dot_text
+    # line_scale). 1.0 = off. Do not lower: at 0.5 two reads went WRONG
+    # and 20 correct reads NOK (the rib map is too coarse).
+    ink_line_scale: 1.0
+    # Search the residual skew on the fit ink scaled by this factor (same
+    # angles tried, a quarter of the pixels to rotate at 0.5). 1.0 = off.
+    deskew_scale: 0.5
+    # Coarse-to-fine cell grid search (font_reader._fit_cells): coarse pass
+    # on every [pitch, offset]-th grid (steps of 0.25 / 0.5 px), then the
+    # grid_refine best ones at full resolution. Off = [2, 2] and 8.
+    grid_coarse: [3, 4]
+    grid_refine: 12
+    # The locator's blackhat on this many horizontal stripes in parallel
+    # (backend/utils/workers.by_rows). Bit-identical result. 1 = serial.
+    locate_threads: 4
+    # Locate the print on the frame scaled by this factor (box mapped back,
+    # crop cut from the full frame; text_locator.locate_text_region_scaled)
+    # with blackhat_threshold x locate_threshold_scale. 1.0 = off. Do not
+    # lower: 14-28 ms faster, but at 0.5 / 0.67 the slightly different
+    # crops gave 1-2 WRONG reads and 3-7 correct reads NOK.
+    locate_scale: 1.0
+    locate_threshold_scale: 1.0
+    # Run one read on a synthetic frame when the engine starts
+    # (OCRead.warmup), so the first real cycles are not slower.
+    warmup: true
+
   # Read validation (backend/detection/ocr/code_validator.py) and the
   # font reader that produces the code (backend/detection/ocr/font_reader.py,
   # a classifier trained on this printer's 5x7 dot font, including

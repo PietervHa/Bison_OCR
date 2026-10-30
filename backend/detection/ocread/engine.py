@@ -33,13 +33,14 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from backend.core.config_loader import cfg
 from backend.detection.ocr.code_validator import (CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE, REJECT_NO_TEXT,
                                                   REJECT_TIMEOUT)
 from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
-from backend.detection.ocr.text_locator import (locate_text_region, deskew_crop, row_profile_rect, alternative_rects,
-                                                extend_rect_along_line)
+from backend.detection.ocr.text_locator import (locate_text_region, locate_text_region_scaled, deskew_crop,
+                                                row_profile_rect, alternative_rects, extend_rect_along_line)
 from backend.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -82,6 +83,8 @@ class OCRead:
         if cv_threads is not None:
             cv2.setNumThreads(int(cv_threads))
         self.downscale = float(ocr_cfg["downscale"])
+        # Speed options (ocr.speed): each one can be switched off on its own.
+        self.speed = dict(ocr_cfg.get("speed") or {})
         self.min_dim = int(ocr_cfg["min_dim"])
 
         # Dynamic ROI: locates the printed text block via classical CV,
@@ -166,6 +169,25 @@ class OCRead:
             for lines in self.skipped_formats:
                 log.warning("OCRead: format %s skipped - the font reader model does not support it", lines)
 
+    def warmup(self):
+        """One read of a synthetic frame (a dark two-line print on grey), so
+        the first real cycles don't pay for first-call costs: OpenCV and
+        numpy code paths, kernels, the worker threads (ocr.speed). Called by
+        the app at startup when ocr.speed.warmup is set. Returns the time in
+        ms; the read itself is thrown away."""
+        t = time.perf_counter()
+        frame = np.full((480, 744, 3), 170, np.uint8)
+        for y, line in ((220, "6274 10:29"), (262, "BB 05/28")):
+            cv2.putText(frame, line, (250, y), cv2.FONT_HERSHEY_PLAIN, 2.4, (60, 60, 60), 3)
+        debug_dir, self.dynamic_roi_debug_dir = self.dynamic_roi_debug_dir, None
+        try:
+            self.read(frame)
+        except Exception as exc:  # pragma: no cover - a warm-up must never stop the app
+            log.warning("OCRead warm-up failed (non-fatal): %s", exc)
+        finally:
+            self.dynamic_roi_debug_dir = debug_dir
+        return round((time.perf_counter() - t) * 1000, 1)
+
     @property
     def validator(self):
         """The first configured format. Assigning one replaces all formats."""
@@ -194,7 +216,7 @@ class OCRead:
         the attempts and step_ms so far as its .attempts / .step_ms.
         prep: the crop's PreparedCrop when the caller has one."""
         reads, attempts = [], []
-        prep = prep or PreparedCrop(crop, deadline)
+        prep = prep or PreparedCrop(crop, deadline, speed=self.speed)
         # More lines first: once a format is trusted, formats with fewer lines
         # can no longer win and are not read (saves a read per cycle). Once a
         # two-line format is accepted (_check passes) with a clearly right
@@ -280,7 +302,14 @@ class OCRead:
             self._last_located = None
             return frame, None
 
-        located = locate_text_region(frame, self.dynamic_roi_cfg, debug_dir=self.dynamic_roi_debug_dir)
+        # speed locate_scale < 1: located on the frame scaled down (the box
+        # mapped back; the crop is cut from the full frame). Retries locate
+        # on the full frame.
+        located = locate_text_region_scaled(frame, dict(self.dynamic_roi_cfg,
+                                                        morph_threads=int(self.speed.get("locate_threads", 1))),
+                                            float(self.speed.get("locate_scale", 1.0)),
+                                            float(self.speed.get("locate_threshold_scale", 1.0)),
+                                            debug_dir=self.dynamic_roi_debug_dir)
         self._last_located = located or None
         if not located:
             log.debug("Dynamic ROI: no text region found on this frame - running OCR on the full frame.")
@@ -392,7 +421,8 @@ class OCRead:
 
         def prepared(rect):
             crop = deskew_crop(frame, rect, extra_padding_px=20)
-            return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline, self.print_ink_ratio)
+            return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline, self.print_ink_ratio,
+                                                          self.speed)
 
         points = located.get("ink_points") if first is not None else None
         if self.row_angle_retry and points is not None and len(points) >= 3:
@@ -499,7 +529,7 @@ class OCRead:
                     reason = None
         else:
             deadline = t0 + self.time_budget_ms / 1000.0 if self.time_budget_ms > 0 else None
-            prep = PreparedCrop(crop, deadline)
+            prep = PreparedCrop(crop, deadline, speed=self.speed)
             try:
                 validator, r, attempts, step_ms = self._read_all_formats(crop, deadline, prep)
             except ReadTimeout as exc:

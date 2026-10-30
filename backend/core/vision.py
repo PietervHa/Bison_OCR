@@ -36,6 +36,8 @@ def bind_app_state(app_state) -> None:
     """
     global ocr_instance
     ocr_instance = OCRead()
+    if (cfg["ocr"].get("speed") or {}).get("warmup") and ocr_instance.font_reader is not None:
+        logger.info("OCRead warm-up: %.0f ms", ocr_instance.warmup())
 
 
 def _normalize_detections(result: dict) -> list:

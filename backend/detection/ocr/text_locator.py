@@ -100,7 +100,16 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     blackhat_kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (max(1, blackhat_kernel_size), max(1, blackhat_kernel_size))
     )
-    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, blackhat_kernel)
+    # morph_threads > 1 (set by OCRead from ocr.speed.locate_threads): on
+    # that many stripes in parallel (backend/utils/workers.by_rows, the
+    # same result).
+    morph_threads = int(dyn_cfg.get("morph_threads", 1) or 1)
+    if morph_threads > 1:
+        from backend.utils.workers import by_rows
+        blackhat = by_rows(lambda img: cv2.morphologyEx(img, cv2.MORPH_BLACKHAT, blackhat_kernel), gray,
+                           2 * (blackhat_kernel.shape[0] // 2) + 2, morph_threads)
+    else:
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, blackhat_kernel)
 
     blackhat_threshold = int(dyn_cfg.get("blackhat_threshold", 25))
     _, dark_mask = cv2.threshold(blackhat, blackhat_threshold, 255, cv2.THRESH_BINARY)
@@ -376,6 +385,51 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
             # For alternative_rects(): the other clusters, only worked out
             # when a read of this one fails.
             "_clusters": (labels, label_ids, boxes, areas, seed_gap, cluster, min_components, (sx1, sy1))}
+
+
+# Pixel lengths and areas of the locator settings (with locate_text_region's
+# defaults), scaled along by locate_text_region_scaled.
+_LENGTH_KEYS = {"blackhat_kernel_size": 25, "long_line_min_length_px": 90, "long_line_erase_thickness_px": 6,
+                "long_line_min_solid_px": 0, "morph_kernel_w": 9, "morph_kernel_h": 5, "max_component_dim": 70,
+                "cluster_max_gap_px": 25, "line_extend_max_perp_px": 18, "line_extend_max_gap_px": 90,
+                "padding_px": 10, "grow_rib_min_solid_px": 40, "grow_max_dim_px": 360}
+_AREA_KEYS = {"min_component_area": 3, "max_component_area": 2000}
+
+
+def locate_text_region_scaled(frame: np.ndarray, dyn_cfg: dict, scale: float = 1.0, threshold_scale: float = 1.0,
+                              debug_dir: Optional[str] = None) -> Optional[dict]:
+    """locate_text_region() on the frame scaled down by scale (INTER_AREA),
+    with every pixel length in dyn_cfg scaled along (areas by scale^2) and
+    blackhat_threshold by threshold_scale (scaling down averages a dot
+    with the plastic around it, so its blackhat is weaker). The result is
+    mapped back to frame pixels: bbox, rotated_rect and ink_points. Without
+    "_clusters" (next-best clusters are found on the full-size frame only:
+    crop_retry_alternatives does nothing then). scale >= 1: as
+    locate_text_region()."""
+    if scale >= 1.0:
+        return locate_text_region(frame, dyn_cfg, debug_dir=debug_dir)
+    small = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    c = dict(dyn_cfg)
+    for key, default in _LENGTH_KEYS.items():
+        c[key] = max(1, int(round(float(c.get(key, default)) * scale))) if c.get(key, default) else 0
+    for key, default in _AREA_KEYS.items():
+        c[key] = float(c.get(key, default)) * scale * scale
+    c["blackhat_threshold"] = float(c.get("blackhat_threshold", 25)) * threshold_scale
+    located = locate_text_region(small, c, debug_dir=debug_dir)
+    if not located:
+        return located
+    inv, (h, w) = 1.0 / scale, frame.shape[:2]
+    x1, y1, x2, y2 = located["bbox"]
+    located["bbox"] = [max(0, int(x1 * inv)), max(0, int(y1 * inv)), min(w, int(np.ceil(x2 * inv))),
+                       min(h, int(np.ceil(y2 * inv)))]
+    rect = located.get("rotated_rect")
+    if rect:
+        located["rotated_rect"] = dict(rect, center=[float(v) * inv for v in rect["center"]],
+                                       size=[float(v) * inv for v in rect["size"]])
+    if located.get("ink_points") is not None:
+        located["ink_points"] = np.asarray(located["ink_points"], np.float32) * inv
+    located.pop("_clusters", None)
+    return located
 
 
 def alternative_rects(located: dict, n: int, padding: int) -> list:
@@ -882,18 +936,63 @@ def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6
     if lines is None:
         return mask
     out = mask.copy()
+    if min_solid_run > 0:
+        # Every long line's ink run in one batch (_longest_ink_runs).
+        todo = [tuple(int(v) for v in line[0]) for line in lines
+                if ((line[0][2] - line[0][0]) ** 2 + (line[0][3] - line[0][1]) ** 2) ** 0.5 >= min_length]
+        todo = [key for key in dict.fromkeys(todo) if key not in hough["runs"]]
+        hough["runs"].update(zip(todo, _longest_ink_runs(mask, todo)))
     for line in lines:
         x1, y1, x2, y2 = line[0]
         length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
         if length < min_length:
             continue
-        if min_solid_run > 0:
-            key = (int(x1), int(y1), int(x2), int(y2))
-            if key not in hough["runs"]:
-                hough["runs"][key] = _longest_ink_run(mask, x1, y1, x2, y2)
-            if hough["runs"][key] < min_solid_run:
-                continue
+        if min_solid_run > 0 and hough["runs"][(int(x1), int(y1), int(x2), int(y2))] < min_solid_run:
+            continue
         cv2.line(out, (x1, y1), (x2, y2), 0, thickness=thickness)
+    return out
+
+
+def _longest_ink_runs(mask: np.ndarray, segments: list) -> list:
+    """_longest_ink_run() of every segment (x1, y1, x2, y2), in one batch:
+    the samples of all segments in one array, each sample computed as
+    np.linspace does it - the same numbers, without ~15 small numpy calls
+    per segment (a quarter of locating the print)."""
+    if not segments:
+        return []
+    seg = np.asarray(segments, np.float64)
+    x1, y1, x2, y2 = seg.T
+    n = (np.maximum(np.abs(x2 - x1), np.abs(y2 - y1))).astype(np.int64) + 1
+    sid = np.repeat(np.arange(len(seg)), n)
+    start = np.r_[0, np.cumsum(n)[:-1]]
+    i = np.arange(int(n.sum())) - start[sid]
+    div = np.maximum(n - 1, 1).astype(np.float64)
+
+    def lin(v0, v1):
+        # np.linspace(v0, v1, n): arange * step + start (for a zero step:
+        # arange / div * delta + start), the last sample set to v1 exactly.
+        delta, step = v1 - v0, (v1 - v0) / div
+        y = np.where((step == 0)[sid], i / div[sid] * delta[sid], i * step[sid]) + v0[sid]
+        last = start + n - 1
+        y[last[n > 1]] = v1[n > 1]
+        return y
+    xs, ys = lin(x1, x2), lin(y1, y2)
+    nx, ny = -(y2 - y1), x2 - x1
+    norm = np.maximum(1e-6, np.hypot(nx, ny))
+    nx, ny = nx / norm, ny / norm
+    h, w = mask.shape[:2]
+    on = np.zeros(len(xs), bool)
+    for o in (-1, 0, 1):
+        xx = np.clip(np.round(xs + o * nx[sid]).astype(int), 0, w - 1)
+        yy = np.clip(np.round(ys + o * ny[sid]).astype(int), 0, h - 1)
+        on |= mask[yy, xx] > 0
+    step = np.hypot(x2 - x1, y2 - y1) / np.maximum(1, n - 1)
+    out = []
+    for k in range(len(seg)):
+        o_k = on[start[k]:start[k] + n[k]]
+        edges = np.flatnonzero(np.diff(np.r_[0, o_k.astype(np.int8), 0]))
+        runs = edges[1::2] - edges[::2]
+        out.append(int(round(float(runs.max()) * float(step[k]))) if len(runs) else 0)
     return out
 
 
