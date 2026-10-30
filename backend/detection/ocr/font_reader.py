@@ -36,10 +36,12 @@ Pipeline, per deskewed crop from the text locator:
 
 Several formats on one crop (OCRead reads every configured format): pass
 a PreparedCrop to read() and the work that doesn't depend on the format is
-done once - ink map, deskew angle per orientation and angle search, line
-bands per line count, and each line's cell grid and cells (line 1
-"#### ##:##" is the same in every format); per format only its own line 2
-grid is fitted. The results are identical to reading each format on its own.
+done once - ink map, deskew angle per angle search (one for both
+orientations: a 180-degree turn keeps the angle; the flipped rotation and
+line bands are the upright ones mirrored), line bands per line count, and
+each line's cell grid and cells (line 1 "#### ##:##" is the same in every
+format); per format only its own line 2 grid is fitted. The results are
+identical to reading each format on its own.
 
 Supports templates of one or two lines made of '#' digit positions,
 spaces and literals the model knows (B : / with the current model; a
@@ -94,6 +96,13 @@ PITCH_RANGE = (0.45, 1.4)
 # pitch by at most this factor (the fixtures: 0.90-1.08). Without it a
 # half-pitch grid (two cells per glyph) won on dense letters like "EXP".
 LINE_PITCH_TOLERANCE = 1.2
+# Coarse-to-fine grid search (_fit_cells): the coarse pass takes every
+# GRID_COARSE[0]-th pitch (0.25 px steps) and every GRID_COARSE[1]-th offset
+# (0.5 px steps); the GRID_REFINE best coarse grids are scored again at full
+# resolution, each over the pitches and offsets up to one coarse step
+# around it. The grid fit was ~60% of a read.
+GRID_COARSE = (2, 2)
+GRID_REFINE = 8
 
 
 # -- geometry (identical to the evaluated prototype) --------------------------
@@ -199,17 +208,32 @@ class _GridTerms:
         self.x0 = np.zeros((len(self.ps), max(len(r) for r in rows)))
         for r, xs in enumerate(rows):
             self.x0[r, :len(xs)] = xs
-        self.p = self.ps[:, None]
+        # The coarse pass's (pitch, offset) grid: every GRID_COARSE-th of each.
+        cp, cx = GRID_COARSE
+        self.xc, self.pc = self.x0[::cp, ::cx], self.ps[::cp, None]
 
     def mean(self, a, b):
         W, cs = self.W, self.cs
         a = np.clip(np.round(a).astype(int), 0, W); b = np.clip(np.round(b).astype(int), 0, W)
         return np.where(b > a, (cs[b] - cs[a]) / np.maximum(1, b - a), 0.0)
 
+    def score(self, cells, r, i):
+        """Grid score of the layout `cells` at full-resolution pitch rows r
+        and offset columns i (index arrays) - the coarse pass's formula."""
+        x, p, K = self.x0[r, i], self.ps[r], len(cells)
+        s = np.zeros_like(x)
+        for k, kind in enumerate(cells):
+            a = x + k * p
+            core = self.mean(a + 0.15 * p, a + 0.85 * p)
+            s += core if kind == "G" else -2.0 * core
+            s -= 0.5 * self.mean(a - 0.08 * p, a + 0.08 * p)
+        s -= 2.0 * (self.mean(x - p, x) + self.mean(x + K * p, x + (K + 1) * p))
+        return s / K
+
     def cells(self, K):
         """core, edge (lists of per-cell arrays, at least K long), left and
-        right (the K-cell grid's) margin terms."""
-        x0, p = self.x0, self.p
+        right (the K-cell grid's) margin terms, on the coarse grid."""
+        x0, p = self.xc, self.pc
         while len(self.core) < K:
             a = x0 + len(self.core) * p
             self.core.append(self.mean(a + 0.15 * p, a + 0.85 * p))
@@ -229,10 +253,12 @@ def _fit_cells(fit, band, template_line, near_pitch=None, shared=None):
     the _GridTerms that several templates fitted on that band share (same
     result as without)."""
     # All pitches at once: row r = pitch ps[r], column j = offset x0 (each
-    # pitch has its own offsets, padded with NaN). The score per (pitch,
-    # offset) is computed element by element exactly as one pitch at a time,
-    # and the first maximum in (layout, pitch, offset) order wins - the same
-    # grid as the per-pitch loop, ~3x faster.
+    # pitch has its own offsets, padded). Coarse to fine: the score is
+    # computed on every GRID_COARSE-th pitch and offset, then at full
+    # resolution around the GRID_REFINE best coarse grids; the first
+    # maximum in (layout, pitch, offset) order of those wins. Not always the
+    # grid of the full search (a narrow peak between coarse samples can be
+    # missed), ~3x less work.
     # The layouts of one line (space printed or not) share the per-cell
     # terms: cell k at x0 + k * p is the same whatever kind it is, and a
     # layout's offsets are a prefix of those of the layout with the fewest
@@ -250,6 +276,7 @@ def _fit_cells(fit, band, template_line, near_pitch=None, shared=None):
     if not len(ps):
         return (-1e18, None)
     x0 = terms.x0
+    cp, cx = GRID_COARSE
     best = (-1e18, None)
     for cells, labels in layouts:
         K = len(cells)
@@ -258,18 +285,35 @@ def _fit_cells(fit, band, template_line, near_pitch=None, shared=None):
         if n == 0:
             continue
         valid = np.arange(n)[None, :] < lens[:, None]
+        # Coarse pass.
+        nc = -(-n // cx)
         core, edge, left, right = terms.cells(K)
-        s = np.zeros_like(x0[:, :n])
+        s = np.zeros_like(terms.xc[:, :nc])
         for k, kind in enumerate(cells):
-            s += core[k][:, :n] if kind == "G" else -2.0 * core[k][:, :n]
-            s -= 0.5 * edge[k][:, :n]
-        s -= 2.0 * (left[:, :n] + right[:, :n])
+            s += core[k][:, :nc] if kind == "G" else -2.0 * core[k][:, :nc]
+            s -= 0.5 * edge[k][:, :nc]
+        s -= 2.0 * (left[:, :nc] + right[:, :nc])
         s /= K
-        s[~valid] = -np.inf
-        r, i = np.unravel_index(int(np.argmax(s)), s.shape)
-        if s[r, i] > best[0]:
-            pr, xr = ps[r], x0[r, i]
-            best = (float(s[r, i]), (labels, [(float(xr + k * pr), float(xr + (k + 1) * pr)) for k in range(K)]))
+        s[~valid[::cp, ::cx]] = -np.inf
+        top = np.argsort(-s, axis=None, kind="stable")[:GRID_REFINE]
+        top = top[np.isfinite(s.ravel()[top])]
+        if not len(top):
+            continue
+        # Fine pass: every full-resolution grid within one coarse step of a
+        # candidate, in (pitch, offset) order.
+        rc, ic = np.unravel_index(top, s.shape)
+        dr, di = np.meshgrid(np.arange(-cp, cp + 1), np.arange(-cx, cx + 1), indexing="ij")
+        r = (rc[:, None] * cp + dr.ravel()[None, :]).ravel()
+        i = (ic[:, None] * cx + di.ravel()[None, :]).ravel()
+        keep = (r >= 0) & (r < len(ps)) & (i >= 0) & (i < n)
+        flat = np.unique(r[keep] * n + i[keep])
+        r, i = flat // n, flat % n
+        r, i = r[valid[r, i]], i[valid[r, i]]
+        sf = terms.score(cells, r, i)
+        j = int(np.argmax(sf))
+        if sf[j] > best[0]:
+            pr, xr = ps[r[j]], x0[r[j], i[j]]
+            best = (float(sf[j]), (labels, [(float(xr + k * pr), float(xr + (k + 1) * pr)) for k in range(K)]))
     return best
 
 
@@ -334,14 +378,16 @@ class ReadTimeout(Exception):
 class PreparedCrop:
     """One crop, read with several templates: segment() and cells_from()
     for any template, with the work shared between templates done once and
-    cached - the ink maps; per orientation the deskew angle per angle search
-    (+/-8, +/-30 deg; a search that lands on an angle already seen shares
-    everything after it) and the sharpness per angle tried (the two searches
-    overlap); per angle the line bands per number of lines; per
-    band the cell grid per (template line, line 1's pitch) and its cells,
-    and the per-cell terms of the grid search the templates share
-    (_GridTerms).
-    Same results as segment() / cells_from() on the crop's ink maps.
+    cached - the ink maps; the deskew angle per angle search (+/-8, +/-30
+    deg; a search that lands on an angle already seen shares everything
+    after it) and the sharpness per angle tried (the two searches overlap),
+    once for both orientations; per angle the rotated ink and the line bands
+    per number of lines, for the flipped orientation the upright ones turned
+    180 degrees; per band the cell grid per (template line, line 1's pitch)
+    and its cells, and the per-cell terms of the grid search the templates
+    share (_GridTerms).
+    Upright: the same results as segment() / cells_from() on the crop's ink
+    maps; flipped: up to a pixel off those on a flipped copy (see segment).
 
     timings_ms: time per step summed over all reads of this crop (ink,
     deskew, band_fit, cell_fit, cells).
@@ -361,8 +407,8 @@ class PreparedCrop:
         self._print_only = None
         self.timings_ms = {}
         self._ink = None
-        self._fit_ink, self._angles, self._rotated, self._bands, self._grids, self._cells = {}, {}, {}, {}, {}, {}
-        self._sharpness = {}                            # per orientation: deskew angle -> sharpness
+        self._angles, self._rotated, self._bands, self._grids, self._cells = {}, {}, {}, {}, {}
+        self._sharpness = {}                            # deskew angle -> sharpness (upright ink)
         self._grid_terms = {}                           # per (flip, angle, band, line 1's pitch): _fit_cells' shared terms
         self._print_ink = {}
 
@@ -381,27 +427,44 @@ class PreparedCrop:
         return self._ink
 
     def _rot(self, which, flip, ang):
+        """The ink rotated by ang; flipped: the upright rotation turned 180
+        degrees (one warpAffine for both orientations)."""
         key = (which, flip, ang)
         if key not in self._rotated:
-            img = self.ink()[0 if which == "boosted" else 1]
-            self._rotated[key] = _rotate(img[::-1, ::-1] if flip else img, ang)
+            if flip:
+                self._rotated[key] = np.ascontiguousarray(self._rot(which, False, ang)[::-1, ::-1])
+            else:
+                self._rotated[key] = _rotate(self.ink()[0 if which == "boosted" else 1], ang)
         return self._rotated[key]
 
     def _lines(self, flip, ang, n_lines):
+        """_fit_lines() on the rotated fit ink; flipped: the upright bands
+        mirrored (same score, the bands in reading order of the flipped crop)."""
         key = (flip, ang, n_lines)
         if key not in self._bands:
-            self._bands[key] = self._timed("band_fit", _fit_lines, self._rot("raw", flip, ang), n_lines)
+            if flip:
+                score, bands = self._lines(False, ang, n_lines)
+                H = self._rot("raw", False, ang).shape[0]
+                self._bands[key] = (score, None if bands is None else [(H - y1, H - y0) for y0, y1 in bands[::-1]])
+            else:
+                self._bands[key] = self._timed("band_fit", _fit_lines, self._rot("raw", False, ang), n_lines)
         return self._bands[key]
 
+    def angle(self, first_deg=8.0):
+        """The crop's residual skew (_deskew) for this angle search. The
+        same for both orientations - turning the crop 180 degrees keeps the
+        print's angle - so it is searched once, on the upright ink."""
+        if first_deg not in self._angles:
+            self._angles[first_deg] = self._timed("deskew", _deskew, self.ink()[1], first_deg=first_deg,
+                                                  cache=self._sharpness)
+        return self._angles[first_deg]
+
     def segment(self, template, flip, first_deg=8.0):
-        """segment() of the crop's fit ink, flipped 180 degrees or not."""
-        if flip not in self._fit_ink:
-            raw = self.ink()[1]
-            self._fit_ink[flip] = raw[::-1, ::-1].copy() if flip else raw
-        if (flip, first_deg) not in self._angles:
-            self._angles[(flip, first_deg)] = self._timed("deskew", _deskew, self._fit_ink[flip], first_deg=first_deg,
-                                                          cache=self._sharpness.setdefault(flip, {}))
-        ang = self._angles[(flip, first_deg)]
+        """segment() of the crop's fit ink, flipped 180 degrees or not. The
+        flipped orientation reuses the upright angle, rotation and bands,
+        turned 180 degrees (segment() on a flipped copy rotates about a
+        centre half a pixel off and can differ by a pixel)."""
+        ang = self.angle(first_deg)
         f = self._rot("raw", flip, ang)
         score, bands = self._lines(flip, ang, len(template))
         fits = []
@@ -438,12 +501,12 @@ class PreparedCrop:
     def band_print_ink(self, flip, ang):
         """Printed ink (_print_mask) of the fit ink in the weaker of the two
         bands of the two-line fit at deskew angle ang, as a fraction of the
-        stronger band's."""
-        if flip not in self._print_ink:
-            m = self.ink()[1] * self._print_mask()
-            self._print_ink[flip] = m[::-1, ::-1].copy() if flip else m
-        _, bands = self._lines(flip, ang, 2)
-        rot = _rotate(self._print_ink[flip], ang)
+        stronger band's. The same in both orientations (min / max of the
+        mirrored bands)."""
+        if "ink" not in self._print_ink:
+            self._print_ink["ink"] = self.ink()[1] * self._print_mask()
+        _, bands = self._lines(False, ang, 2)
+        rot = _rotate(self._print_ink["ink"], ang)
         mass = [float(rot[y0:y1].sum()) for y0, y1 in bands]
         return min(mass) / max(max(mass), 1e-9)
 
@@ -540,8 +603,13 @@ class FontReader:
             # Fast path: narrow angle search. If that read isn't clearly right,
             # redo it with the full +/-30 degree search (a wrong angle inside
             # the narrow range can otherwise win on a skewed crop).
+            # The angle is the same in both orientations (PreparedCrop.angle):
+            # a +/-30 search that lands on the narrow search's angle would read
+            # the same segment again and is skipped.
             src = prep
             for first_deg in (8.0, 30.0):
+                if first_deg != 8.0 and src.angle(first_deg) == src.angle(8.0):
+                    break
                 seg = src.segment(template, flip, first_deg=first_deg)
                 if seg["second_line"]:
                     if (src is not prep or prep.print_ink_ratio is None

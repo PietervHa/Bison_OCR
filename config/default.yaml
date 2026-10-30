@@ -262,9 +262,15 @@ ocr:
     # line over the ink that continues it (a rib between the words of a
     # one-line print left the far word out), then the next-best
     # crop_retry_alternatives clusters, as they are and lengthened (the
-    # largest cluster was embossing or a moulding defect).
+    # largest cluster was embossing or a moulding defect). The next-best
+    # clusters are off (0): none of the 7 tried on the test images was
+    # accepted.
     crop_retry: true
-    crop_retry_alternatives: 2
+    crop_retry_alternatives: 0
+    # Time for the whole retry chain (row angle, ink located, widened, ...)
+    # in ms from its start, within time_budget_ms; past it the read stays
+    # NOK with the first attempt's reason. 0 = no limit of its own.
+    retry_budget_ms: 800
 
     # Debug aid: when true, writes intermediate images (blackhat mask,
     # detected bbox overlay, etc.) to debug_dir on every read - useful for

@@ -10,6 +10,7 @@ the leave-one-bottle-out results.)
 
 Run with:  python -m unittest tests.test_font_reader
 """
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -72,7 +73,7 @@ class VerificationModelTests(unittest.TestCase):
 
 
 class _FakeReader:
-    min_literal_score, min_digit_confidence = -1.0, 0.0
+    min_literal_score, min_digit_confidence, early_exit_literal = -1.0, 0.0, -0.25
 
     def __init__(self, result):
         self.result = result
@@ -245,7 +246,7 @@ class SingleLineReadTests(unittest.TestCase):
 
 class _PerFormatReader:
     """Fake font reader: a fixed result per template (None = nothing read)."""
-    min_literal_score, min_digit_confidence = -1.0, 0.0
+    min_literal_score, min_digit_confidence, early_exit_literal = -1.0, 0.0, -0.25
 
     def __init__(self, results):
         self.results = {tuple(k): v for k, v in results.items()}
@@ -320,6 +321,24 @@ class OCReadRowAngleRetryTests(unittest.TestCase):
         self.assertEqual(r["text"], "6288 13:19 BB 05/28")
         self.assertIsNone(r["validation"]["reads"][0]["row_angle_retry"])
         self.assertEqual(len(e.font_reader.crops), 1)
+
+    def test_retry_chain_stops_at_the_retry_budget(self):
+        from backend.detection.ocr.font_reader import ReadTimeout
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 88/88", lit=-6.0)},
+                         {tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=1.0)})
+        e.time_budget_ms, e.retry_budget_ms = 0, 1e-6
+        deadlines = []
+        read = e.font_reader.read
+
+        def timed_read(crop, template):
+            if crop.deadline is not None and time.perf_counter() > crop.deadline:
+                deadlines.append(crop.deadline)
+                raise ReadTimeout("past the retry budget")
+            return read(crop, template)
+        e.font_reader.read = timed_read
+        r = e.read(self._frame())
+        self.assertEqual((r["failure_reason"], r["text"]), ("format_mismatch", ""))
+        self.assertTrue(deadlines, "the retry crop must carry the retry budget's deadline")
 
     def test_retry_below_the_digit_confidence_gate_stays_nok(self):
         # 15-10-2026_5-58-43_122: the retry's line 2 cells were half a cell
@@ -406,6 +425,7 @@ class OCReadEmbossingTests(unittest.TestCase):
         cls.engine = OCRead()
         cls.engine.dynamic_roi_debug_dir = None
         cls.engine.time_budget_ms = 0
+        cls.engine.retry_budget_ms = 0                  # its retry chain alone takes ~0.5 s
         cls.frame = load_image(FIX.parent / "ocread" / "one_line_beside_embossing.jpg", 744)
 
     @classmethod
@@ -501,6 +521,20 @@ class OCReadFormatSelectionTests(unittest.TestCase):
         r = self._engine({tuple(TPL): _res("6274 05:58", "BB 05/28", lit=-0.9),
                           tuple(TPL_EXP): _res("6274 05:58", "EXP 05/28", lit=-0.1)}).read(self._frame())
         self.assertEqual(r["validation"]["format"], TPL_EXP)
+
+    def test_other_two_line_formats_are_not_read_once_one_is_clearly_accepted(self):
+        e = self._engine({tuple(TPL): _res("6274 10:29", "BB 05/28", lit=-0.1),
+                          tuple(TPL_EXP): _res("6274 10:29", "EXP 05/28", lit=0.0)})
+        self.assertEqual(e.read(self._frame())["text"], "6274 10:29 BB 05/28")
+        self.assertEqual(e.font_reader.calls, [TPL])
+
+    def test_other_two_line_formats_are_read_after_an_invalid_value(self):
+        # Not accepted (invalid_value): the next formats are still read; the
+        # choice between trusted reads is unchanged (higher literal score).
+        e = self._engine({tuple(TPL): _res("6274 10:29", "BB 13/28", lit=-0.1),
+                          tuple(TPL_EXP): _res("6274 10:29", "EXP 05/28", lit=0.0)})
+        self.assertEqual(e.read(self._frame())["text"], "6274 10:29 EXP 05/28")
+        self.assertEqual(e.font_reader.calls[:2], [TPL, TPL_EXP])
 
     def test_unsupported_format_is_skipped(self):
         e = self._engine({tuple(TPL_ONE): _res("6286 16:24")}, skipped=[TPL_EXP])
@@ -737,24 +771,29 @@ class SharedFormatWorkTests(unittest.TestCase):
         self.assertEqual(calls.count("#### ##:##"), 2)     # once on 2 bands, once on 1 band
         self.assertEqual(len(calls), 2 + len([f for f in self.formats if len(f) == 2]))
 
-    def test_vectorised_grid_fit_matches_the_per_pitch_loop(self):
+    def test_coarse_to_fine_grid_fit_matches_the_full_search(self):
+        # On print: the same grid as the full per-pitch search. On random
+        # ink (no print, odd sizes and pitch hints) the coarse pass can miss
+        # a narrow peak: never a higher score than the full search, and close.
         from backend.detection.ocr.font_reader import _fit_cells, _fit_lines, ink_maps, line_pitch
         rng = np.random.default_rng(0)
-        cases = []
         for name, crop in self._crops():
             raw = ink_maps(crop)[1]
             _, bands = _fit_lines(raw, 2)
             l1 = _fit_cells_per_pitch(raw, bands[0], "#### ##:##")
-            cases += [(raw, bands[0], "#### ##:##", None)] + [
-                (raw, bands[1], f[1], line_pitch(l1)) for f in self.formats if len(f) == 2]
-        for _ in range(10):                                 # random ink, odd sizes and pitch hints
+            for fit, band, tl, near in [(raw, bands[0], "#### ##:##", None)] + [
+                    (raw, bands[1], f[1], line_pitch(l1)) for f in self.formats if len(f) == 2]:
+                with self.subTest(crop=name, band=band, line=tl, near=near):
+                    self.assertEqual(_fit_cells(fit, band, tl, near), _fit_cells_per_pitch(fit, band, tl, near))
+        for _ in range(10):
             H, W = int(rng.integers(20, 120)), int(rng.integers(10, 400))
             y0 = int(rng.integers(0, H - 5))
-            cases.append((rng.random((H, W)).astype(np.float32), (y0, int(min(H, y0 + rng.integers(1, 40)))),
-                          "BB ##/##", None if rng.random() < 0.5 else float(rng.uniform(5, 40))))
-        for fit, band, tl, near in cases:
-            with self.subTest(band=band, line=tl, near=near):
-                self.assertEqual(_fit_cells(fit, band, tl, near), _fit_cells_per_pitch(fit, band, tl, near))
+            fit, band = rng.random((H, W)).astype(np.float32), (y0, int(min(H, y0 + rng.integers(1, 40))))
+            near = None if rng.random() < 0.5 else float(rng.uniform(5, 40))
+            with self.subTest(band=band, near=near):
+                got, full = _fit_cells(fit, band, "BB ##/##", near)[0], _fit_cells_per_pitch(fit, band, "BB ##/##", near)[0]
+                self.assertLessEqual(got, full + 1e-12)
+                self.assertGreaterEqual(got, full - 0.05 * abs(full) - 1e-9)
 
     def test_engine_reports_time_per_step_and_per_format(self):
         from backend.detection.ocread import engine

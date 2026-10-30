@@ -116,9 +116,15 @@ class OCRead:
         self.row_angle_retry_min_confidence = float(dynamic_roi_cfg.get("row_angle_retry_min_digit_confidence", 0.9))
         self.row_angle_retry_min_literal = float(dynamic_roi_cfg.get("row_angle_retry_min_literal_score", -0.05))
         # Further retries on other crops (widened along the line, next-best
-        # clusters), past the same gates; see _retry_rects.
+        # clusters), past the same gates; see _retry_crops. The next-best
+        # clusters are off by default: 0 of 7 tried on the test images were
+        # accepted.
         self.crop_retry = bool(dynamic_roi_cfg.get("crop_retry", False))
-        self.crop_retry_alternatives = int(dynamic_roi_cfg.get("crop_retry_alternatives", 2))
+        self.crop_retry_alternatives = int(dynamic_roi_cfg.get("crop_retry_alternatives", 0))
+        # Time for the whole retry chain (ms from its start; within the
+        # read's own time_budget_ms). Past it the read keeps the first
+        # attempt's reject reason. 0 = no limit of its own.
+        self.retry_budget_ms = float(dynamic_roi_cfg.get("retry_budget_ms", 800) or 0)
         # Printed ink vs moulded lettering on a retry (ink_retry): the print
         # located again with the locator's ink filter, and every retry
         # deciding "does the crop hold a second line" on printed ink
@@ -190,9 +196,19 @@ class OCRead:
         reads, attempts = [], []
         prep = prep or PreparedCrop(crop, deadline)
         # More lines first: once a format is trusted, formats with fewer lines
-        # can no longer win and are not read (saves a read per cycle).
+        # can no longer win and are not read (saves a read per cycle). Once a
+        # two-line format is accepted (_check passes) with a clearly right
+        # literal score (font reader's early_exit_literal), the other
+        # two-line formats are not read either: a print has one line 2, and
+        # on the 514 test images no frame had two trusted two-line formats
+        # (it saved ~30 ms on 432 of the 502 correct reads). A doubtful
+        # accepted read still lets a later format with a higher score win.
+        clear = self.font_reader.early_exit_literal
         for v in sorted(self._read_formats(), key=lambda v: -len(v.lines)):
             if any(t and len(x.lines) > len(v.lines) for x, _, t in reads):
+                break
+            if any(t and len(x.lines) == 2 and (clear is None or r["literal_score"] >= clear)
+                   and self._check(x, r) is None for x, r, t in reads):
                 break
             ts = time.perf_counter()
             try:
@@ -357,7 +373,7 @@ class OCRead:
           clusters (text_locator.alternative_rects, crop_retry_alternatives
           of them), lengthened like "widened" when there is ink to extend
           over, when the largest cluster was embossing or a moulding defect
-          instead of the print.
+          instead of the print. Off by default (crop_retry_alternatives 0).
 
         Generated lazily, after the previous crop was read: a read accepted
         on an earlier crop costs nothing for the later ones. The first read
@@ -393,6 +409,7 @@ class OCRead:
                     yield "ink_located", prep, rect
         if self.print_ink_ratio is not None and first_prep is not None and self.crop_retry:
             first_prep.print_ink_ratio = self.print_ink_ratio
+            first_prep.deadline = deadline
             yield "first_print_ink", first_prep, first
         if first is None or not self.crop_retry:       # nothing located, or the axis-aligned box only
             return
@@ -422,7 +439,11 @@ class OCRead:
         the test images); otherwise None, also when the deadline passes.
         attempts: those of every crop tried, each marked with its retry
         name, also when none was accepted. rect: the crop's rect in the
-        frame."""
+        frame. The chain stops at deadline or retry_budget_ms after its
+        start, whichever comes first."""
+        if self.retry_budget_ms > 0:
+            end = time.perf_counter() + self.retry_budget_ms / 1000.0
+            deadline = end if deadline is None else min(deadline, end)
         tried, name = [], None
         try:
             for name, prep, rect in self._retry_crops(frame, located, first_prep, deadline):
