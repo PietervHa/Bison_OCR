@@ -810,6 +810,48 @@ class SharedFormatWorkTests(unittest.TestCase):
         self.assertTrue(all(t["ms"] > 0 for t in read["formats_tried"]))
 
 
+
+class CompiledGridSearchTests(unittest.TestCase):
+    """ocr.speed.grid_jit: the numba search (optional dependency) gives
+    exactly the grids and scores of the exhaustive per-pitch search; without
+    numba _fit_cells falls back to the numpy search."""
+
+    def _cases(self):
+        from backend.detection.ocr.font_reader import _fit_lines, ink_maps, line_pitch
+        cases = []
+        for name in ("4113_rib_through_6.png", "3030_crossing_ribs.png", "4113_upside_down.png"):
+            raw = ink_maps(cv2.imread(str(FIX / name)))[1]
+            _, bands = _fit_lines(raw, 2)
+            near = line_pitch(_fit_cells_per_pitch(raw, bands[0], "#### ##:##"))
+            cases += [(raw, bands[0], "#### ##:##", None)] + [
+                (raw, bands[1], tl, near) for tl in ("BB ##/##", "EXP ##/##", "PROD ##/##")]
+        rng = np.random.default_rng(0)
+        for _ in range(40):                                 # random ink, odd sizes and pitch hints
+            H, W = int(rng.integers(20, 120)), int(rng.integers(10, 400))
+            y0 = int(rng.integers(0, H - 5))
+            cases.append((rng.random((H, W)).astype(np.float32), (y0, int(min(H, y0 + rng.integers(1, 40)))),
+                          str(rng.choice(["BB ##/##", "#### ##:##", "EXP ##/##"])),
+                          None if rng.random() < 0.5 else float(rng.uniform(5, 40))))
+        return cases
+
+    def test_compiled_search_matches_the_exhaustive_search(self):
+        from backend.detection.ocr import grid_jit
+        from backend.detection.ocr.font_reader import _fit_cells
+        if not grid_jit.available():
+            self.skipTest(grid_jit.status())
+        for fit, band, tl, near in self._cases():
+            with self.subTest(band=band, line=tl, near=near):
+                self.assertEqual(_fit_cells(fit, band, tl, near, jit=True), _fit_cells_per_pitch(fit, band, tl, near))
+
+    def test_without_numba_the_numpy_search_is_used(self):
+        from backend.detection.ocr import grid_jit
+        from backend.detection.ocr.font_reader import _fit_cells
+        fit, band, tl, near = self._cases()[1]
+        with mock.patch.object(grid_jit, "_status", (False, "numba not available (test)")):
+            self.assertFalse(grid_jit.available())
+            self.assertEqual(_fit_cells(fit, band, tl, near, coarse=(3, 4), refine=12, jit=True),
+                             _fit_cells(fit, band, tl, near, coarse=(3, 4), refine=12))
+
 # -- no print found / time budget ---------------------------------------------------
 
 class OCReadNoPrintAndTimeBudgetTests(unittest.TestCase):

@@ -38,6 +38,7 @@ import numpy as np
 from backend.core.config_loader import cfg
 from backend.detection.ocr.code_validator import (CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE, REJECT_NO_TEXT,
                                                   REJECT_TIMEOUT)
+from backend.detection.ocr import grid_jit
 from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
 from backend.detection.ocr.text_locator import (locate_text_region, locate_text_region_scaled, deskew_crop,
                                                 row_profile_rect, alternative_rects, extend_rect_along_line)
@@ -85,6 +86,10 @@ class OCRead:
         self.downscale = float(ocr_cfg["downscale"])
         # Speed options (ocr.speed): each one can be switched off on its own.
         self.speed = dict(ocr_cfg.get("speed") or {})
+        # grid_jit: the compiled cell grid search when numba is installed and
+        # compiles (logged once by grid_jit.available()); else numpy's.
+        if self.speed.get("grid_jit"):
+            grid_jit.available()
         self.min_dim = int(ocr_cfg["min_dim"])
 
         # Dynamic ROI: locates the printed text block via classical CV,

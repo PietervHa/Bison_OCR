@@ -38,6 +38,13 @@ ocr:
     # grid_refine best ones at full resolution. Off = [2, 2] and 8.
     grid_coarse: [3, 4]
     grid_refine: 12
+    # The cell grid search compiled with numba (optional dependency:
+    # requirements-optional.txt; font_reader/grid_jit.py): every pitch and
+    # offset - exactly the grids of the exhaustive search, grid_coarse /
+    # grid_refine not used. Without numba (or when it fails to compile)
+    # the numpy search above; the log says which one runs. The compiled
+    # kernel is cached on disk; only the first start compiles (~4 s).
+    grid_jit: true
     # The locator's blackhat on this many horizontal stripes in parallel
     # (backend/utils/workers.by_rows). Bit-identical result. 1 = serial.
     locate_threads: 4

@@ -58,6 +58,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from backend.detection.ocr import grid_jit
 from backend.detection.ocr.dot_text import clean_dot_text
 
 DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "font_reader.npz"
@@ -252,14 +253,18 @@ class _GridTerms:
         return self.core, self.edge, self.left, self.right[K]
 
 
-def _fit_cells(fit, band, template_line, near_pitch=None, shared=None, coarse=GRID_COARSE, refine=GRID_REFINE):
+def _fit_cells(fit, band, template_line, near_pitch=None, shared=None, coarse=GRID_COARSE, refine=GRID_REFINE,
+               jit=False):
     """Best fixed-pitch grid for one line: (score, (labels, [(x0, x1), ...])).
     near_pitch: line 1's pitch (px) - this line's pitch is then searched
     within LINE_PITCH_TOLERANCE of it instead of PITCH_RANGE alone.
     shared: a dict kept per (fit, band, near_pitch) by the caller, holding
     the _GridTerms that several templates fitted on that band share (same
     result as without). coarse, refine: the coarse-to-fine search's steps
-    (GRID_COARSE, GRID_REFINE; speed options grid_coarse, grid_refine)."""
+    (GRID_COARSE, GRID_REFINE; speed options grid_coarse, grid_refine).
+    jit: with numba available (grid_jit.available()), the compiled
+    exhaustive search instead - every pitch and offset, exactly the grid
+    and score of the full search; coarse / refine are then not used."""
     # All pitches at once: row r = pitch ps[r], column j = offset x0 (each
     # pitch has its own offsets, padded). Coarse to fine: the score is
     # computed on every GRID_COARSE-th pitch and offset, then at full
@@ -283,6 +288,18 @@ def _fit_cells(fit, band, template_line, near_pitch=None, shared=None, coarse=GR
     ps, W = terms.ps, terms.W
     if not len(ps):
         return (-1e18, None)
+    if jit and grid_jit.available():
+        # len(np.arange(-0.5 * q, W - K * q * 0.8, 0.5)) per pitch q, as numpy
+        # computes it: ceil((stop - start) / step), at least 0.
+        lens = [np.maximum(0, np.ceil(((W - len(cells) * ps * 0.8) - (-0.5 * ps)) / 0.5)).astype(np.int64)
+                for cells, _ in layouts]
+        best = (-1e18, None)
+        for (cells, labels), (score, r, i) in zip(layouts, grid_jit.best_grids(terms.cs, W, ps, terms.x0, layouts,
+                                                                                  lens)):
+            if r >= 0 and score > best[0]:
+                pr, xr = ps[r], terms.x0[r, i]
+                best = (score, (labels, [(float(xr + k * pr), float(xr + (k + 1) * pr)) for k in range(len(cells))]))
+        return best
     x0 = terms.x0
     cp, cx = terms.coarse
     best = (-1e18, None)
@@ -502,7 +519,8 @@ class PreparedCrop:
                 shared = self._grid_terms.setdefault((flip, ang, band, near), {})
                 self._grids[key] = self._timed("cell_fit", _fit_cells, f, band, tl, near, shared,
                                                tuple(self.speed.get("grid_coarse", GRID_COARSE)),
-                                               int(self.speed.get("grid_refine", GRID_REFINE)))
+                                               int(self.speed.get("grid_refine", GRID_REFINE)),
+                                               bool(self.speed.get("grid_jit", False)))
             fits.append(self._grids[key])
         seg = {"angle": ang, "bands": bands, "lines": [g for _, g in fits],
                "line_fit": [s for s, _ in fits], "second_line": False}
