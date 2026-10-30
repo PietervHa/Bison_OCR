@@ -1,6 +1,6 @@
 # Bison OCR – OCRead
 
-Reads the dot-printed code on bottle caps (e.g. `4113 08:26` / `BB 05/26`) on the MDE Automation production line. A camera frame goes through a classical-CV text locator and a classifier trained on the printer's dot font (the "font reader"). The read is then checked against the print format. The result goes to the PLC over TCP and is shown on a web HMI.
+Reads the dot-printed code on bottle caps (e.g. `4113 08:26` / `BB 05/26`, `6274 05:58` / `EXP 05/28`, `6288 22:00` / `PROD 10/26`, or the single line `6286 16:24`) on the MDE Automation production line. A camera frame goes through a classical-CV text locator and a classifier trained on the printer's dot font (the "font reader"). The read is then checked against the print format. The result goes to the PLC over TCP and is shown on a web HMI.
 
 A read is either a validated code or an explicit NOK with a reason. A rejected read never shows or sends a guessed code.
 
@@ -53,6 +53,7 @@ camera frame
   -> text locator (backend/detection/ocr/text_locator.py)   finds the print, strips rib lines
   -> deskewed crop + optional downscale
   -> font reader (backend/detection/ocr/font_reader.py)     dot_text.py cleanup + trained classifier
+     (once per configured print format; the trusted format with the most lines wins)
   -> format check (backend/detection/ocr/code_validator.py) template + value_pattern
   -> result (mode "ocread")
 ```
@@ -119,7 +120,7 @@ With `camera.source: "images"` the app reads still images from `camera.images_di
 |---|---|
 | `docs/architecture.md` | Components, threads, data flow, result contract, failure reasons |
 | `docs/configuration.md` | Every configuration key |
-| `docs/development.md` | Tests, QC tools, debug captures, changing the print template |
+| `docs/development.md` | Tests, QC tools, debug captures, changing the print formats |
 | `docs/project-map.md` | Files and what they do |
 | `docs/roadmap.md` | Open items |
 | `docs/VisionLinkTest.st` | PLC-side test program (Structured Text) |

@@ -5,6 +5,7 @@ the HMI routes step and start a read.
 
 Run with:  python -m unittest tests.test_image_source
 """
+import importlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +17,7 @@ from backend.core.image_source import ImageFolderSource
 from backend.core.state import AppState
 
 try:
-    import httpx  # noqa: F401  (FastAPI's TestClient needs it)
+    importlib.import_module("httpx")  # FastAPI's TestClient needs it
     from fastapi.testclient import TestClient
     from frontend.web import create_app
     HAVE_CLIENT = True

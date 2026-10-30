@@ -6,7 +6,9 @@ management, vision processing, the TCP trigger server for PLC integration,
 and the web interface.
 """
 
+import sys
 import threading
+import traceback
 import keyboard
 import uvicorn
 from pathlib import Path
@@ -21,6 +23,7 @@ import time
 from backend.core.config_loader import cfg
 from backend.utils.logger import setup_logging, get_logger, UVICORN_LOG_CONFIG
 from backend.output.result_writer import save_result
+from backend.utils.priority import set_process_priority
 
 log = get_logger(__name__)
 _vision_busy = threading.Event()
@@ -65,20 +68,46 @@ def _process_vision_result(result, trigger_time, app_state):
                 detection_count,
             )
         else:
+            validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
             log.info(
-                "VISION RESULT: status=%s cycle_time_ms=%s confidence=%s detections=%s",
+                "VISION RESULT: status=%s cycle_time_ms=%s confidence=%s detections=%s format=%s",
                 status,
                 cycle_time_ms,
                 confidence,
                 detection_count,
+                validation.get("format"),
             )
     except Exception as exc:
         log.error("Failed to process vision result: %s", exc)
 
+def _start_stall_watchdog(cycle_done, trigger_time):
+    """Log the stack of every thread while a cycle is still running after
+    debug.stall_dump_ms, and again at each further multiple (max 3 dumps),
+    to show where a stalled cycle is stuck. 0 disables it."""
+    interval_s = float(cfg.get("debug", {}).get("stall_dump_ms", 2000)) / 1000.0
+    if interval_s <= 0:
+        return
+
+    def _watch():
+        for _ in range(3):
+            if cycle_done.wait(interval_s):
+                return
+            elapsed_ms = (time.perf_counter() - trigger_time) * 1000
+            names = {t.ident: t.name for t in threading.enumerate()}
+            parts = [f"STALL: cycle still running after {elapsed_ms:.0f} ms; thread stacks:"]
+            for ident, frame in sys._current_frames().items():
+                if ident == threading.get_ident():
+                    continue
+                parts.append(f"--- thread {names.get(ident, '?')} ({ident})")
+                parts.append("".join(traceback.format_stack(frame)).rstrip())
+            log.warning("\n".join(parts))
+
+    threading.Thread(target=_watch, name="stall-watchdog", daemon=True).start()
+
+
 def start_vision_cycle(camera, app_state) -> bool:
     """Grab a frame and start one vision cycle in the background.
     Returns False when a cycle is already running."""
-    global _vision_busy
     if _vision_busy.is_set():
         return False
     frame = camera.get_frame()
@@ -88,16 +117,21 @@ def start_vision_cycle(camera, app_state) -> bool:
     # Track trigger time for cycle time measurement
     trigger_time = time.perf_counter()
 
+    cycle_done = threading.Event()
+    _start_stall_watchdog(cycle_done, trigger_time)
+
     def _callback(result):
         try:
             _process_vision_result(result, trigger_time, app_state)
         finally:
+            cycle_done.set()
             _vision_busy.clear()
 
     _vision_busy.set()
     try:
         run_vision(frame, callback=_callback)  # background thread, calls _callback
     except Exception:
+        cycle_done.set()
         _vision_busy.clear()
         raise
     log.debug("Vision processing started (non-blocking)")
@@ -141,6 +175,9 @@ def main():
     Sets up logging, application state, camera, web server, and TCP trigger server.
     """
     setup_logging()
+    priority = (cfg.get("performance") or {}).get("process_priority", "normal")
+    if set_process_priority(priority):
+        log.info("Process priority: %s", priority)
     app_state = AppState()
     bind_app_state(app_state)
 

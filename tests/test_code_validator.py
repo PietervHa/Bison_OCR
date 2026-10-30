@@ -5,6 +5,7 @@ information into a pass.
 
 Run with:  python -m unittest tests.test_code_validator
 """
+import datetime
 import unittest
 
 from backend.detection.ocr.code_validator import CodeTemplate
@@ -112,6 +113,45 @@ class TemplateTests(unittest.TestCase):
 
     def test_nothing_read(self):
         self.assertEqual(T().validate([])["reason"], "no_text_detected")
+
+
+class ExpiryYearTests(unittest.TestCase):
+    """max_expiry_years: the YY of a BB / EXP date within this year .. this
+    year + max_expiry_years. "BB 05/38" read for 05/28 fit the value
+    pattern at digit confidence 0.999."""
+    ANY = r"^\d{4} \d{2}:\d{2}( (BB|EXP|PROD) \d{2}/\d{2})?$"
+
+    def _t(self, label, year=2026, max_years=5):
+        return CodeTemplate(["#### ##:##", f"{label} ##/##"], value_pattern=self.ANY,
+                            max_expiry_years=max_years, today=lambda: datetime.date(year, 10, 29))
+
+    def _reason(self, t, line2):
+        return t.validate(toks("6288 15:21", line2))["reason"]
+
+    def test_year_inside_the_window_is_accepted(self):
+        for yy in ("26", "28", "31"):
+            self.assertIsNone(self._reason(self._t("BB"), f"BB 05/{yy}"), yy)
+            self.assertIsNone(self._reason(self._t("EXP"), f"EXP 05/{yy}"), yy)
+
+    def test_year_outside_the_window_is_invalid_value(self):
+        for yy in ("25", "32", "38", "00"):
+            self.assertEqual(self._reason(self._t("BB"), f"BB 05/{yy}"), "invalid_value", yy)
+            self.assertEqual(self._reason(self._t("EXP"), f"EXP 05/{yy}"), "invalid_value", yy)
+
+    def test_window_wraps_at_the_century(self):
+        t = self._t("BB", year=2098)
+        self.assertIsNone(self._reason(t, "BB 05/01"))
+        self.assertEqual(self._reason(t, "BB 05/97"), "invalid_value")
+
+    def test_prod_date_is_not_checked(self):
+        self.assertIsNone(self._reason(self._t("PROD"), "PROD 10/20"))
+
+    def test_off_by_default_in_the_constructor(self):
+        t = CodeTemplate(["#### ##:##", "BB ##/##"], value_pattern=self.ANY)
+        self.assertIsNone(t.validate(toks("6288 15:21", "BB 05/38"))["reason"])
+
+    def test_config_default_is_five_years(self):
+        self.assertEqual(CodeTemplate.from_config({"template": ["#### ##:##", "BB ##/##"]}).max_expiry_years, 5)
 
 
 class VisionStatusTests(unittest.TestCase):

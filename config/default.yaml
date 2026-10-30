@@ -23,10 +23,14 @@ ocr:
   # A read is only OK when it fits the print format; otherwise NOK with a
   # reason (format_mismatch / low_confidence / invalid_value /
   # no_text_detected), shown on the HMI. On OK the PLC receives the
-  # canonical code, e.g. "4113 08:26 BB 05/26" (always this spacing).
-  # If the font reader can't be loaded or doesn't support the template,
-  # every read is NOK with failure_reason ocr_engine_error.
+  # canonical code, e.g. "4113 08:26 BB 05/26" or "6286 16:24" (always
+  # this spacing). If the font reader can't be loaded or supports none of
+  # the templates, every read is NOK with failure_reason ocr_engine_error.
   read_validation:
+    # Safety net: a read still running after this many ms (incl. locating
+    # the print) stops and is NOK with failure_reason "timeout", never a
+    # code. On the 514 test images the slowest read is ~1.2 s. 0 = no limit.
+    time_budget_ms: 1500
     font_reader:
       model: ''                   # '' = backend/detection/ocr/models/font_reader.npz
       # To check on the line that it READS rather than recalls known codes:
@@ -40,18 +44,38 @@ ocr:
       # Rejects garbled cuts / wrong orientation; -2.0..-1.0 all gave the
       # same result on the real frames.
       min_literal_score: -1.0
-      # Every digit at least this confident. 0.0 = most correct reads
-      # (73/6/4 on unseen bottles); 0.5 = fewer wrong reads (58/1/24).
-      # Wrong reads still end as NOK at the PLC, which compares with the
-      # expected code.
-      min_digit_confidence: 0.0
-    # One entry per printed line. # = digit, A = letter, * = any character,
-    # space = gap between fields, anything else must be printed literally.
+      # Every digit at least this confident. Calibrated on the 514 test
+      # images: the lowest wrong read accepted at 0.0 had 0.632 ("06:20"
+      # for 06:27), the next correct read 0.745; 0.7 sits in that gap and
+      # costs one correct read (at 0.192). Higher values only cost more
+      # correct reads (0.8: 2, 0.9: 3, 0.95: 5) and catch no more wrong
+      # ones. (Earlier, on unseen bottles: 0.0 = 73 correct / 6 wrong / 4
+      # rejected, 0.5 = 58/1/24.)
+      min_digit_confidence: 0.7
+    # The print formats the line uses; each is a list with one entry per
+    # printed line. # = digit, A = letter, * = any character, space = gap
+    # between fields, anything else must be printed literally.
+    # Every format the font reader model supports is tried on each crop; a
+    # format with characters the model doesn't know (E, X, P, R, D with the
+    # current model) is skipped with a warning at startup. A literal O is
+    # read as 0 (same glyph in this dot font). Of the trusted
+    # reads the format with more lines wins, so a two-line print is never
+    # accepted as the single-line format. The chosen format is logged.
     # This is product-specific: change it when the printer format changes.
-    template: ["#### ##:##", "BB ##/##"]
+    # (An older config with a single `template: [...]` still works.)
+    templates:
+      - ["#### ##:##", "BB ##/##"]
+      - ["#### ##:##", "EXP ##/##"]
+      - ["#### ##:##", "PROD ##/##"]
+      - ["#### ##:##"]
     # Optional regex the canonical code must fully match (value sanity:
-    # hour 00-23, minute 00-59, month 01-12). '' to disable.
-    value_pattern: '^\d{4} ([01]\d|2[0-3]):[0-5]\d BB (0[1-9]|1[0-2])/\d{2}$'
+    # hour 00-23, minute 00-59, month 01-12), for all formats. '' to disable.
+    value_pattern: '^\d{4} ([01]\d|2[0-3]):[0-5]\d( (BB|EXP|PROD) (0[1-9]|1[0-2])/\d{2})?$'
+    # The year YY of an expiry date (BB / EXP MM/YY) must lie between this
+    # year and this year + max_expiry_years (system date), else NOK
+    # invalid_value: "BB 05/38" read for 05/28 fits value_pattern and was
+    # read at digit confidence 0.999. PROD dates are not checked. 0 = off.
+    max_expiry_years: 5
     # Template matching settings (code_validator.py). The font reader's
     # lines are checked at confidence 1.0, so min_confidence never rejects
     # them; its own gates are min_literal_score / min_digit_confidence above.
@@ -108,6 +132,14 @@ ocr:
     reject_long_lines: true
     long_line_min_length_px: 60
     long_line_erase_thickness_px: 6
+    # When the frame gives no text cluster, retry with only the lines
+    # erased that have an unbroken run of ink of at least this many px
+    # (0 = no retry). Hough also finds "lines" along a dotted row of
+    # printed characters; erasing those usually helps (it splits a row
+    # into per-character components) but on one-line prints it left
+    # nothing to cluster. A rib is one continuous stroke, a text row
+    # breaks at every character gap.
+    long_line_min_solid_px: 40
     # Morphological close kernel used to merge individual dots/pins of a
     # dot-matrix character back into a single connected component before
     # measuring component size. Wider than tall, since characters in a
@@ -140,6 +172,29 @@ ocr:
     # rejecting rib/embossing fragments, which ran 80-400+px in at least
     # one dimension on real production frames.
     max_component_dim: 70
+    # Printed ink, not moulded lettering: a component (or a blob grown over
+    # the print) counts only when at least ink_min_dark_fraction of its box
+    # is clearly darker than the plastic around it (gray < ink_dark_ratio x
+    # the closing-based background). Embossing ("KKT", "P2144/1", "209-3")
+    # is relief shading: it passes the blackhat threshold, and its shadow
+    # edges reach 0.6-0.7 of the background (at 0.7, KKT / P2144 outlines
+    # on the 15-10 caps had 11-30% such pixels per box); printed ink is
+    # darker, < 0.6 even on faint prints. At 0.6, components outside the
+    # print are mostly < 1%, the print's mostly > 10%, few in 2-7% either
+    # side. Without this the embossing beside a print joined its cluster,
+    # tilted the box and was read as a second line. 0 = off. (Ink colour
+    # does not separate them on this camera: B-(R+G)/2 is ~-1.5 on the
+    # print.)
+    # Used on a retry (ink_retry: engine.py, _retry_crops "ink_located"):
+    # a read that failed is retried on the print located with this ink
+    # filter, and every retry decides "does the crop hold a second line" on
+    # printed ink (font_reader.SECOND_LINE_MIN_PRINT_INK). ink_filter: the
+    # first locate too - off: its tighter, level crops read worse on 3
+    # test images the unfiltered locate reads correctly.
+    ink_dark_ratio: 0.6
+    ink_min_dark_fraction: 0.04
+    ink_filter: false
+    ink_retry: true
     # A cluster of components only counts as "the text" once it has at
     # least this many components (i.e. this many characters/dots found
     # close together) - filters out stray noise clusters.
@@ -168,12 +223,60 @@ ocr:
     # Padding in pixels added around the detected text block before
     # cropping, so characters at the edge aren't clipped.
     padding_px: 25
+    # Grow the found cluster over the whole print (text_locator.py,
+    # _grow_over_print). The rib eraser above also erases rows of printed
+    # characters, so the cluster alone often held only part of the print
+    # (crop with "19:3" of "6286 19:34", or a print without its first
+    # characters). In a mask where only solid strokes are erased (an
+    # unbroken run of ink of at least grow_rib_min_solid_px - a text row
+    # breaks at every character gap) the blobs chained to the cluster
+    # (gap <= cluster_max_gap_px, each at most grow_max_dim_px) are added.
+    # Last resort for a frame where the passes above find no cluster
+    # (text_locator.py): take the largest cluster that has
+    # min_cluster_components (not the largest one overall, which can be a
+    # 2-3 blob rib or embossing remnant just outweighing the print), also
+    # in the solid-lines-only mask without the close (which merges each
+    # word of a one-line print into one blob above max_component_dim).
+    # Only frames that were not located before are affected.
+    locate_last_resort: true
+    grow_over_print: true
+    grow_rib_min_solid_px: 40
+    grow_max_dim_px: 360
+    # Second attempt for a read that failed (engine.py, _row_angle_retry):
+    # deskew at the angle of the print's rows instead of the tightest box's
+    # angle (which a rib or embossing in the ink tilted 10-50 degrees off a
+    # level print), when the two differ by at least min_diff_deg. The first
+    # attempt is never replaced, so a read it accepts stays as it is. The
+    # retry is accepted only when it passes every normal check AND these
+    # stricter gates: a misfitted cell grid can still fit the template
+    # with one digit guessed (e.g. "EXP 06/28" for "EXP 05/28" at digit
+    # confidence 0.16); accepted first reads are >= 0.95 in 99% of the
+    # test images.
+    row_angle_retry: true
+    row_angle_retry_min_diff_deg: 3.0
+    row_angle_retry_min_digit_confidence: 0.9
+    row_angle_retry_min_literal_score: -0.05
+    # After the row angle retry, further retries on other crops for a read
+    # that still failed (engine.py, _retry_rects), past the same gates and
+    # within the same time budget: the crop lengthened along the print's
+    # line over the ink that continues it (a rib between the words of a
+    # one-line print left the far word out), then the next-best
+    # crop_retry_alternatives clusters, as they are and lengthened (the
+    # largest cluster was embossing or a moulding defect). The next-best
+    # clusters are off (0): none of the 7 tried on the test images was
+    # accepted.
+    crop_retry: true
+    crop_retry_alternatives: 0
+    # Time for the whole retry chain (row angle, ink located, widened, ...)
+    # in ms from its start, within time_budget_ms; past it the read stays
+    # NOK with the first attempt's reason. 0 = no limit of its own.
+    retry_budget_ms: 800
 
     # Debug aid: when true, writes intermediate images (blackhat mask,
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
     # tuning the thresholds above against real bottles, but leave off in
     # normal production since it writes a file per cycle.
-    debug_save: false
+    debug_save: true
     debug_dir: "data/debug/dynamic_roi"
 
 # Camera settings
@@ -253,11 +356,29 @@ camera:
 # HMI settings
 hmi:
   enable_video_feed: true
+  # Preview stream on the HMI: frames per second, JPEG quality and scale
+  # (0.5 = half width and height). At 15 fps and full size one stream cost
+  # ~14% of a core (744x408, 23 kB per frame).
+  stream_fps: 10
+  stream_quality: 75
+  stream_scale: 0.5
+
+# Keeping the read cycle steady while other programs use the PC (measured:
+# a ~300 ms first read took 1.0-1.5 s while another program used 3-4 cores).
+performance:
+  # Windows priority of the app process (normal / above_normal / high) and
+  # of the vision thread (normal / above_normal / highest). Elsewhere: no-op.
+  process_priority: above_normal
+  vision_thread_priority: highest
+  # OpenCV worker threads (cv2.setNumThreads): 1 runs every vision step on
+  # the vision thread itself, at its priority; the same speed as 8 on these
+  # small crops when the PC is quiet. Unset = OpenCV's default (all cores).
+  cv_threads: 1
 
 # Web settings
 web:
   host: "0.0.0.0"
-  port: 5000
+  port: 5050
 
 # Output settings
 output:

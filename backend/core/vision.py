@@ -8,8 +8,10 @@ OK/NOK status.
 
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
+from backend.core.config_loader import cfg
 from backend.detection.ocread.engine import MODE, OCRead
 from backend.utils.logger import get_logger
+from backend.utils.priority import set_thread_priority
 import time
 
 logger = get_logger(__name__)
@@ -17,8 +19,14 @@ logger = get_logger(__name__)
 # Global instances managed by this module
 ocr_instance = None
 
+def _init_worker() -> None:
+    """Runs once on the vision thread: its priority
+    (performance.vision_thread_priority, see backend/utils/priority.py)."""
+    set_thread_priority((cfg.get("performance") or {}).get("vision_thread_priority", "normal"))
+
+
 # A single-threaded pool to process vision tasks sequentially without blocking the main loop
-_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision_worker")
+_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision_worker", initializer=_init_worker)
 
 
 def bind_app_state(app_state) -> None:

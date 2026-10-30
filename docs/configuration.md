@@ -22,11 +22,14 @@ All settings are in `config/default.yaml`. Start with `--config <path>` to use a
 | `font_reader.model` | `''` | `''` = `backend/detection/ocr/models/font_reader.npz`. Verification models live in `models/verification/` (see below). |
 | `font_reader.min_literal_score` | `-1.0` | `B`, `:` and `/` must look like themselves (mean log-probability). Rejects garbled cuts and wrong orientation as `format_mismatch`. |
 | `font_reader.min_digit_confidence` | `0.0` | Lowest allowed digit confidence, otherwise `low_confidence` |
-| `template` | `["#### ##:##", "BB ##/##"]` | One entry per printed line: `#` digit, `A` letter, `*` any character, space = field gap, anything else literal. The font reader needs exactly two lines. |
-| `value_pattern` | hour/minute/month regex | Regex the canonical code must fully match, otherwise `invalid_value`. `''` disables it. |
+| `templates` | `["#### ##:##", "BB ##/##"]`, `["#### ##:##", "EXP ##/##"]`, `["#### ##:##", "PROD ##/##"]`, `["#### ##:##"]` | The print formats in use. Each format is a list with one entry per printed line: `#` digit, `A` letter, `*` any character, space = field gap, anything else literal. The font reader reads formats of one or two lines. A format with characters the model doesn't know (`E`, `X`, `P`, `R`, `D` with the current model) is skipped with a warning at startup. A literal `O` is scored as `0`: in this dot font they are the same glyph. Digit positions are never mapped. |
+| `template` | – | The older single-format key, e.g. `["#### ##:##", "BB ##/##"]`. Only used when `templates` is absent. |
+| `value_pattern` | hour/minute/month regex, `BB`/`EXP`/`PROD` line optional | Regex the canonical code must fully match, for every format, otherwise `invalid_value`. `''` disables it. |
 | `min_confidence`, `max_corrections`, `max_ignored_tokens` | `0.80`, `1`, `3` | Template-matching settings of `code_validator.py`. The font reader's lines are checked at confidence 1.0, so `min_confidence` never rejects them. |
 
-If the font reader can't be loaded, or doesn't support the template, the app still starts and logs an error. Every read is then NOK with `failure_reason: ocr_engine_error`.
+**Choosing the format**: every supported format is read on the same crop. Of the trusted reads (`min_literal_score` and `min_digit_confidence` pass), the format with more lines wins, then the higher `literal_score`. A two-line print is never accepted as the single-line format: when a two-line format is trusted it wins, and the font reader refuses to read a one-line format on a crop that holds two lines. The chosen format is in `validation.format` of the result and in the `VISION RESULT` log line. Formats are read with the most lines first; once one is trusted, formats with fewer lines are not read, so a two-line print costs the same time as before (~0.3 s on the fixture crop). A single-line print first fails the two-line format(s), which takes longer (~1.5 s on the fixture crop).
+
+If the font reader can't be loaded, or supports none of the formats, the app still starts and logs an error. Every read is then NOK with `failure_reason: ocr_engine_error`.
 
 **Verification models**: `backend/detection/ocr/models/verification/font_reader_without_<bottle>.npz` were trained without that bottle (4113, 3030, 5203, 5307). Point `font_reader.model` at one and put that bottle under the camera to check that the reader reads rather than recalls. Set it back to `''` afterwards.
 

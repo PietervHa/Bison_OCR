@@ -60,5 +60,132 @@ class ProjectPathTests(unittest.TestCase):
         absolute = str(Path.cwd().resolve())
         self.assertEqual(resolve_project_path(absolute), absolute)
 
+class TrainFontReaderLabelTests(unittest.TestCase):
+    def test_line1_candidates(self):
+        from datetime import datetime
+        from QC_tools.train_font_reader import capture_time, line1_candidates
+        t = capture_time("UId_0_Time_1-10-2026_10-28-51_123.jpg")
+        self.assertEqual(t, datetime(2026, 10, 1, 10, 28, 51))
+        self.assertEqual(line1_candidates(t), [(-1, "6274 10:27"), (0, "6274 10:28"), (1, "6274 10:29")])
+
+    def test_duplicates_are_removed(self):
+        from datetime import datetime
+        from QC_tools.train_font_reader import line1_candidates
+        # +30 s stays in the same minute -> two candidates
+        self.assertEqual(line1_candidates(datetime(2026, 10, 1, 10, 28, 10)),
+                         [(-1, "6274 10:27"), (0, "6274 10:28")])
+
+    def test_day_follows_the_shifted_time(self):
+        from datetime import datetime
+        from QC_tools.train_font_reader import line1_candidates
+        self.assertEqual(line1_candidates(datetime(2026, 10, 1, 23, 59, 45))[-1], (1, "6275 00:00"))
+        self.assertEqual(line1_candidates(datetime(2026, 10, 2, 0, 0, 20))[0], (-1, "6274 23:59"))
+
+    def test_no_capture_time_in_the_name(self):
+        from QC_tools.train_font_reader import capture_time
+        self.assertIsNone(capture_time("photo.jpg"))
+
+    def test_line2_date_per_format(self):
+        from QC_tools.train_font_reader import capture_time, label_lines
+        t = capture_time("UId_0_Time_15-10-2026_10-28-51_123.jpg")
+        # PROD prints the production month (capture date), BB/EXP --date
+        self.assertEqual(label_lines(["#### ##:##", "PROD ##/##"], "6288 10:28", "05/28", t), ["6288 10:28", "PROD 10/26"])
+        self.assertEqual(label_lines(["#### ##:##", "BB ##/##"], "6288 10:28", "05/28", t), ["6288 10:28", "BB 05/28"])
+        self.assertEqual(label_lines(["#### ##:##", "EXP ##/##"], "6288 10:28", "05/28", t), ["6288 10:28", "EXP 05/28"])
+        self.assertEqual(label_lines(["#### ##:##"], "6288 10:28", "05/28", t), ["6288 10:28"])
+
+
+class EvaluateImagesTests(unittest.TestCase):
+    FORMATS = [["#### ##:##", "BB ##/##"], ["#### ##:##", "PROD ##/##"], ["#### ##:##"]]
+
+    def _expected(self):
+        from QC_tools.train_font_reader import capture_time
+        from QC_tools.evaluate_images import expected_texts
+        return expected_texts(capture_time("UId_0_Time_15-10-2026_10-28-51_123.jpg"), "05/28", self.FORMATS)
+
+    def test_expected_texts(self):
+        exp = self._expected()
+        self.assertEqual(len(exp), 9)          # 3 formats x 3 line 1 candidates
+        for code in ("6288 10:27 BB 05/28", "6288 10:29 PROD 10/26", "6288 10:28"):
+            self.assertIn(code, exp)
+        self.assertNotIn("6288 10:28 PROD 05/28", exp)
+
+    def test_outcome(self):
+        from QC_tools.evaluate_images import outcome
+        ok = lambda text, fmt: {"text": text, "validation": {"accepted": True, "format": fmt}}
+        self.assertEqual(outcome(ok("6288 10:29 PROD 10/26", self.FORMATS[1]), self._expected()),
+                         ("correct", "6288 10:29 PROD 10/26", "PROD"))
+        self.assertEqual(outcome(ok("6288 10:30 BB 05/28", self.FORMATS[0]), self._expected())[:2],
+                         ("WRONG", "6288 10:30 BB 05/28"))
+        self.assertEqual(outcome(ok("6288 10:28", self.FORMATS[2]), self._expected())[2], "single_line")
+        nok = {"text": "", "failure_reason": "format_mismatch", "validation": {"accepted": False, "format": None}}
+        self.assertEqual(outcome(nok, self._expected()), ("NOK", "", "none"))
+
+    def test_summarize(self):
+        from QC_tools.evaluate_images import summarize
+        rows = [{"outcome": "correct", "format": "BB", "reason": None, "ms": 100.0},
+                {"outcome": "NOK", "format": "none", "reason": "format_mismatch", "ms": 300.0},
+                {"outcome": "WRONG", "format": "BB", "reason": None, "ms": 200.0}]
+        s = summarize(rows)
+        self.assertEqual(list(s), ["BB", "none", "total"])
+        self.assertEqual(s["BB"], {"images": 2, "correct_ok": 1, "wrong_ok": 1, "nok": 0, "nok_reasons": {},
+                                   "avg_ms": 150.0, "max_ms": 200.0})
+        self.assertEqual(s["total"]["nok_reasons"], {"format_mismatch": 1})
+        self.assertEqual(s["total"]["max_ms"], 300.0)
+
+
+class TrainFontReaderLiteralCheckTests(unittest.TestCase):
+    """literal_check: fixed characters must read as themselves, letters the
+    model doesn't know must at least have print in their cell."""
+    CLASSES = [str(d) for d in range(10)] + ["B", ":", "/"]
+
+    def _check(self, template, text, ink=None):
+        import numpy as np
+        from types import SimpleNamespace
+        from QC_tools.train_font_reader import literal_check
+        reader = SimpleNamespace(idx={c: i for i, c in enumerate(self.CLASSES)})
+        pos = [c for c in text if c != " "]
+        p = np.full((len(pos), len(self.CLASSES)), 0.01)
+        for i, c in enumerate(pos):
+            if c in reader.idx:
+                p[i, reader.idx[c]] = 0.9           # the model reads what is printed
+        cells = [np.full((24, 16), (ink or {}).get(i, 0.2), np.float32) for i in range(len(pos))]
+        return literal_check(reader, template, cells, p)
+
+    def test_matching_print_passes(self):
+        self.assertIsNone(self._check(["#### ##:##", "BB ##/##"], "6274 09:16 BB 05/28"))
+
+    def test_grid_shifted_by_one_fails_on_colon(self):
+        self.assertEqual(self._check(["#### ##:##"], "274 09:16 2"), "':' not read at its position")
+
+    def test_b_must_read_as_b(self):
+        self.assertEqual(self._check(["#### ##:##", "BB ##/##"], "6274 09:16 EX 05/28"), "'B' not read at its position")
+
+    def test_unknown_letter_on_an_empty_cell_fails(self):
+        # EXP grid on a BB print: the P lands on the gap before the date
+        self.assertEqual(self._check(["#### ##:##", "EXP ##/##"], "6274 09:16 BBP 05/28", ink={11: 0.01}),
+                         "no print at letter 'P'")
+        self.assertIsNone(self._check(["#### ##:##", "EXP ##/##"], "6274 09:16 EXP 05/28"))
+
+
+class TrainFontReaderSegmentFormatsTests(unittest.TestCase):
+    """segment_formats (shared work across formats) gives exactly what
+    font_reader.segment() gives per format, orientation and angle search."""
+
+    def test_same_as_segment_per_format(self):
+        import cv2
+        from backend.detection.ocr.font_reader import ink_maps, segment
+        from QC_tools.train_font_reader import segment_formats
+        fix = Path(__file__).resolve().parent / "fixtures" / "font_reader"
+        formats = [["#### ##:##", "BB ##/##"], ["#### ##:##", "EXP ##/##"], ["#### ##:##", "PROD ##/##"], ["#### ##:##"]]
+        for name in ("4113_upside_down.png", "3030_crossing_ribs.png"):
+            _, raw = ink_maps(cv2.imread(str(fix / name)))
+            got = list(segment_formats(raw, formats))
+            self.assertGreaterEqual(len(got), 2 * len(formats))
+            for tpl, (flip, first_deg), seg in got:
+                with self.subTest(name=name, tpl=tpl, flip=flip, first_deg=first_deg):
+                    self.assertEqual(seg, segment(raw[::-1, ::-1].copy() if flip else raw, tpl, first_deg=first_deg))
+
+
 if __name__ == "__main__":
     unittest.main()

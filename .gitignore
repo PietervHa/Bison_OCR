@@ -131,3 +131,7 @@ data/
 __pycache__/
 /.venv/
 /.claude/settings.local.json
+/tests/fixtures/ocread/one_line_beside_embossing.jpg
+/tests/fixtures/ocread/two_line_bb_line2_dots_missing.jpg
+/tests/fixtures/ocread/two_line_bb_rib_across.jpg
+/tests/fixtures/ocread/two_line_exp_rib_across.jpg
