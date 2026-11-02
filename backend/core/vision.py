@@ -36,6 +36,8 @@ def bind_app_state(app_state) -> None:
     """
     global ocr_instance
     ocr_instance = OCRead()
+    if (cfg["ocr"].get("speed") or {}).get("warmup") and ocr_instance.font_reader is not None:
+        logger.info("OCRead warm-up: %.0f ms", ocr_instance.warmup())
 
 
 def _normalize_detections(result: dict) -> list:
@@ -114,7 +116,19 @@ def _normalize_result(result: dict) -> dict:
     return normalized
 
 
-def _run_with_callback(fn, frame, callback, profile: bool = False) -> None:
+def capture_time_of(source):
+    """The capture time of the frame source's last frame (its
+    frame_capture_time(): the system clock for the camera, the file name for
+    test images), None when the source has none."""
+    fn = getattr(source, "frame_capture_time", None)
+    try:
+        return fn() if callable(fn) else None
+    except Exception as exc:  # pragma: no cover - never let this stop a cycle
+        logger.warning("Capture time unavailable: %s", exc)
+        return None
+
+
+def _run_with_callback(fn, frame, callback, profile: bool = False, capture_time=None) -> None:
     """
     Executes a vision function asynchronously in a background thread and returns the result via a callback.
     """
@@ -125,7 +139,10 @@ def _run_with_callback(fn, frame, callback, profile: bool = False) -> None:
         try:
             # The worker runs the read off the main thread so the caller
             # can continue immediately while the result is prepared.
-            result = fn(frame, profile=profile) if profile else fn(frame)
+            kwargs = {"profile": True} if profile else {}
+            if capture_time is not None:
+                kwargs["capture_time"] = capture_time
+            result = fn(frame, **kwargs)
         except Exception as exc:
             exception_msg = str(exc)
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -144,11 +161,13 @@ def _run_with_callback(fn, frame, callback, profile: bool = False) -> None:
     _pool.submit(worker)
 
 
-def run_vision(frame, callback=None, profile: bool = False):
+def run_vision(frame, callback=None, profile: bool = False, capture_time=None):
     """
     The main entry point for running a vision task on a frame.
     
     Supports both synchronous and asynchronous (via callback) execution.
+    capture_time: when the frame was captured (capture_time_of(source)), for
+    OCRead's time plausibility check; None = unknown.
     """
     if frame is None:
         no_frame_result = {
@@ -164,6 +183,7 @@ def run_vision(frame, callback=None, profile: bool = False):
         return normalized
 
     if callback:
-        _run_with_callback(ocr_instance.read, frame, callback, profile=profile)
+        _run_with_callback(ocr_instance.read, frame, callback, profile=profile, capture_time=capture_time)
         return None
-    return _normalize_result(ocr_instance.read(frame, profile=profile))
+    kwargs = {"capture_time": capture_time} if capture_time is not None else {}
+    return _normalize_result(ocr_instance.read(frame, profile=profile, **kwargs))

@@ -135,3 +135,4 @@ __pycache__/
 /tests/fixtures/ocread/two_line_bb_line2_dots_missing.jpg
 /tests/fixtures/ocread/two_line_bb_rib_across.jpg
 /tests/fixtures/ocread/two_line_exp_rib_across.jpg
+/requirements-optional.txt

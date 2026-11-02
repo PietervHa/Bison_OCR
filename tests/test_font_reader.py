@@ -810,6 +810,141 @@ class SharedFormatWorkTests(unittest.TestCase):
         self.assertTrue(all(t["ms"] > 0 for t in read["formats_tried"]))
 
 
+
+
+class OCReadAgreementTests(unittest.TestCase):
+    """A read accepted in the grey zone of digit confidence (agreement_band)
+    is re-read on slightly moved crops and only accepted when they all read
+    the same code; above the band it is accepted as it is."""
+
+    def _engine(self, first, later):
+        e = OCReadRowAngleRetryTests._engine(self, first, later, box_angle=0.0)
+        e.agreement_band, e.agreement_reads = (0.7, 0.98), 2
+        return e
+
+    def _frame(self):
+        return np.full((480, 744, 3), 190, np.uint8)
+
+    def test_grey_zone_read_whose_moved_crops_agree_is_accepted(self):
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=0.918)},
+                         {tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=0.95)})
+        r = e.read(self._frame())
+        self.assertEqual(r["text"], "6288 13:19 BB 05/28")
+        self.assertEqual(r["validation"]["reads"][0]["agreement"]["codes"], ["6288 13:19 BB 05/28"] * 2)
+        self.assertEqual(len(e.font_reader.crops), 3)
+
+    def test_grey_zone_read_whose_moved_crops_disagree_is_unstable(self):
+        # 1-10-2026_6-32-50_738 in the stress test: "06:34" for 06:33 at 0.954.
+        e = self._engine({tuple(TPL): _res("6274 06:34", "BB 05/28", lit=0.0, conf=0.954)},
+                         {tuple(TPL): _res("6274 06:33", "BB 05/28", lit=0.0, conf=1.0)})
+        r = e.read(self._frame())
+        self.assertEqual((r["failure_reason"], r["text"], r["detections"]), ("unstable_read", "", []))
+        self.assertEqual(r["validation"]["reads"][0]["agreement"]["codes"], ["6274 06:33 BB 05/28"])
+
+    def test_moved_crop_that_is_not_accepted_makes_the_read_unstable(self):
+        e = self._engine({tuple(TPL): _res("6274 06:20", "BB 05/28", lit=0.0, conf=0.972)}, {})
+        self.assertEqual(e.read(self._frame())["failure_reason"], "unstable_read")
+
+    def test_confident_read_is_not_read_again(self):
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=0.99)},
+                         {tuple(TPL): _res("6288 13:19", "BB 06/28", lit=0.0, conf=1.0)})
+        r = e.read(self._frame())
+        self.assertEqual(r["text"], "6288 13:19 BB 05/28")
+        self.assertIsNone(r["validation"]["reads"][0]["agreement"])
+        self.assertEqual(len(e.font_reader.crops), 1)
+
+
+class OCReadTimePlausibilityTests(unittest.TestCase):
+    """Line 1 must be a print time near the capture time; unknown capture
+    time = the check is skipped."""
+
+    def _engine(self, result):
+        from backend.detection.ocread import engine
+        e = engine.OCRead()
+        e.dynamic_roi_debug_dir = None
+        e.validators = [engine.CodeTemplate(TPL, value_pattern=VALUE_PATTERN)]
+        e.skipped_formats = []
+        e.font_reader = _PerFormatReader({tuple(TPL): result})
+        e.time_check, e.time_window_before, e.time_window_after = True, 2, 1
+        return _print_found(e)
+
+    def _frame(self):
+        return np.full((480, 744, 3), 190, np.uint8)
+
+    def test_print_time_near_the_capture_time_is_accepted(self):
+        import datetime
+        r = self._engine(_res("6274 06:33", "BB 05/28")).read(
+            self._frame(), capture_time=datetime.datetime(2026, 10, 1, 6, 32, 50))
+        self.assertEqual(r["text"], "6274 06:33 BB 05/28")
+        self.assertEqual(r["validation"]["reads"][0]["capture_time"], "2026-10-01T06:32:50")
+
+    def test_print_time_outside_the_window_is_implausible(self):
+        import datetime
+        from backend.core import vision
+        r = self._engine(_res("6274 06:34", "BB 05/28")).read(
+            self._frame(), capture_time=datetime.datetime(2026, 10, 1, 6, 32, 50))
+        self.assertEqual((r["failure_reason"], r["text"], r["detections"]), ("implausible_time", "", []))
+        n = vision._normalize_result(r)
+        self.assertEqual((n["status"], n["failure_reason"]), ("NOK", "implausible_time"))
+
+    def test_unknown_capture_time_or_check_off_skips_the_check(self):
+        import datetime
+        e = self._engine(_res("6274 06:34", "BB 05/28"))
+        self.assertEqual(e.read(self._frame())["text"], "6274 06:34 BB 05/28")
+        e.time_check = False
+        self.assertEqual(e.read(self._frame(), capture_time=datetime.datetime(2026, 10, 1, 6, 32, 50))["text"],
+                         "6274 06:34 BB 05/28")
+
+    def test_test_image_mode_passes_the_file_name_time(self):
+        import datetime, tempfile
+        from backend.core import vision
+        from backend.core.image_source import ImageFolderSource
+        with tempfile.TemporaryDirectory() as d:
+            cv2.imwrite(str(Path(d) / "UId_0_Time_1-10-2026_6-32-50_738.jpg"), np.zeros((8, 8, 3), np.uint8))
+            src = ImageFolderSource(d)
+            self.assertEqual(vision.capture_time_of(src), datetime.datetime(2026, 10, 1, 6, 32, 50))
+
+class CompiledGridSearchTests(unittest.TestCase):
+    """ocr.speed.grid_jit: the numba search (optional dependency) gives
+    exactly the grids and scores of the exhaustive per-pitch search; without
+    numba _fit_cells falls back to the numpy search."""
+
+    def _cases(self):
+        from backend.detection.ocr.font_reader import _fit_lines, ink_maps, line_pitch
+        cases = []
+        for name in ("4113_rib_through_6.png", "3030_crossing_ribs.png", "4113_upside_down.png"):
+            raw = ink_maps(cv2.imread(str(FIX / name)))[1]
+            _, bands = _fit_lines(raw, 2)
+            near = line_pitch(_fit_cells_per_pitch(raw, bands[0], "#### ##:##"))
+            cases += [(raw, bands[0], "#### ##:##", None)] + [
+                (raw, bands[1], tl, near) for tl in ("BB ##/##", "EXP ##/##", "PROD ##/##")]
+        rng = np.random.default_rng(0)
+        for _ in range(40):                                 # random ink, odd sizes and pitch hints
+            H, W = int(rng.integers(20, 120)), int(rng.integers(10, 400))
+            y0 = int(rng.integers(0, H - 5))
+            cases.append((rng.random((H, W)).astype(np.float32), (y0, int(min(H, y0 + rng.integers(1, 40)))),
+                          str(rng.choice(["BB ##/##", "#### ##:##", "EXP ##/##"])),
+                          None if rng.random() < 0.5 else float(rng.uniform(5, 40))))
+        return cases
+
+    def test_compiled_search_matches_the_exhaustive_search(self):
+        from backend.detection.ocr import grid_jit
+        from backend.detection.ocr.font_reader import _fit_cells
+        if not grid_jit.available():
+            self.skipTest(grid_jit.status())
+        for fit, band, tl, near in self._cases():
+            with self.subTest(band=band, line=tl, near=near):
+                self.assertEqual(_fit_cells(fit, band, tl, near, jit=True), _fit_cells_per_pitch(fit, band, tl, near))
+
+    def test_without_numba_the_numpy_search_is_used(self):
+        from backend.detection.ocr import grid_jit
+        from backend.detection.ocr.font_reader import _fit_cells
+        fit, band, tl, near = self._cases()[1]
+        with mock.patch.object(grid_jit, "_status", (False, "numba not available (test)")):
+            self.assertFalse(grid_jit.available())
+            self.assertEqual(_fit_cells(fit, band, tl, near, coarse=(3, 4), refine=12, jit=True),
+                             _fit_cells(fit, band, tl, near, coarse=(3, 4), refine=12))
+
 # -- no print found / time budget ---------------------------------------------------
 
 class OCReadNoPrintAndTimeBudgetTests(unittest.TestCase):

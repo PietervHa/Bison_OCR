@@ -87,6 +87,7 @@ unable to recover at all.
 """
 
 import cv2
+import datetime
 import importlib
 import logging
 import numpy as np
@@ -433,6 +434,10 @@ class Camera:
         self.app_state = app_state
         self.lock = threading.Lock()
         self.latest_frame = None
+        # System clock when latest_frame was grabbed / when the frame that
+        # get_frame() returned last was grabbed (frame_capture_time()).
+        self.latest_frame_time = None
+        self._returned_frame_time = None
         self.running = True
         self._flip = cfg["camera"]["flip"]
 
@@ -614,6 +619,7 @@ class Camera:
                     # rotation == 0: no rotation
                     with self.lock:
                         self.latest_frame = processed
+                        self.latest_frame_time = datetime.datetime.now()
                 except Exception as exc:
                     log.error("Frame post-processing failed: %s", exc, exc_info=True)
 
@@ -661,7 +667,14 @@ class Camera:
         with self.lock:
             if not self.connected or self.latest_frame is None:
                 return None
+            self._returned_frame_time = self.latest_frame_time
             return self.latest_frame.copy()
+
+    def frame_capture_time(self):
+        """System clock when the frame get_frame() returned last was grabbed
+        (OCRead's time plausibility check), None before the first frame."""
+        with self.lock:
+            return self._returned_frame_time
 
     def is_connected(self):
         """

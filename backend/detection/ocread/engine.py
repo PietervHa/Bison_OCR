@@ -33,18 +33,29 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from backend.core.config_loader import cfg
-from backend.detection.ocr.code_validator import (CodeTemplate, REJECT_FORMAT, REJECT_CONFIDENCE, REJECT_NO_TEXT,
-                                                  REJECT_TIMEOUT)
+from backend.detection.ocr.code_validator import (CodeTemplate, LINE1, REJECT_FORMAT, REJECT_CONFIDENCE,
+                                                  REJECT_IMPLAUSIBLE, REJECT_NO_TEXT, REJECT_TIMEOUT, REJECT_UNSTABLE,
+                                                  plausible_line1)
+from backend.detection.ocr import grid_jit
 from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
-from backend.detection.ocr.text_locator import (locate_text_region, deskew_crop, row_profile_rect, alternative_rects,
-                                                extend_rect_along_line)
+from backend.detection.ocr.text_locator import (locate_text_region, locate_text_region_scaled, deskew_crop,
+                                                row_profile_rect, alternative_rects, extend_rect_along_line)
 from backend.utils.logger import get_logger
 
 log = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# Agreement check (OCRead._agree): the fixed moves of the read's box per
+# extra read, in this order - (dx px, dy px, angle deg, size factor): one of
+# each kind of perturbation of the stress test that found reads accepted
+# WRONG at digit confidence 0.946-0.972 (shift +/-2 px, turn +/-1 deg,
+# size +/-3%), then the opposite turn. With two moves (shift and turn
+# only), 3 of 5140 perturbed reads still agreed on a wrong code.
+AGREEMENT_MOVES = ((2.0, -2.0, 0.0, 1.0), (0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 0.0, 1.03), (0.0, 0.0, -1.0, 1.0))
 
 MODE = "ocread"
 
@@ -82,6 +93,12 @@ class OCRead:
         if cv_threads is not None:
             cv2.setNumThreads(int(cv_threads))
         self.downscale = float(ocr_cfg["downscale"])
+        # Speed options (ocr.speed): each one can be switched off on its own.
+        self.speed = dict(ocr_cfg.get("speed") or {})
+        # grid_jit: the compiled cell grid search when numba is installed and
+        # compiles (logged once by grid_jit.available()); else numpy's.
+        if self.speed.get("grid_jit"):
+            grid_jit.available()
         self.min_dim = int(ocr_cfg["min_dim"])
 
         # Dynamic ROI: locates the printed text block via classical CV,
@@ -107,6 +124,23 @@ class OCRead:
         # start of read(), incl. locating the print) stops and is NOK
         # "timeout" - never a code. 0 = no limit.
         self.time_budget_ms = float(val_cfg.get("time_budget_ms", 1500) or 0)
+        # Agreement check for a read accepted with its lowest digit confidence
+        # in agreement_band [lo, hi): re-read on agreement_reads slightly moved
+        # crops (AGREEMENT_MOVES); accepted only if all of them are accepted
+        # with the same code, else NOK unstable_read. 0 reads = off.
+        band = val_cfg.get("agreement_band") or [0.7, 0.98]
+        self.agreement_band = (float(band[0]), float(band[1]))
+        self.agreement_reads = min(len(AGREEMENT_MOVES), int(val_cfg.get("agreement_reads", 2) or 0))
+        # Plausibility of line 1 (year digit + day of year, HH:MM) against
+        # the capture time (read(capture_time=...)): the print time must lie
+        # within [capture - time_window_before, capture + time_window_after]
+        # minutes, else NOK implausible_time. Skipped (and logged) when the
+        # capture time is unknown or line 1 is another layout.
+        self.time_check = bool(val_cfg.get("time_check", False))
+        self.time_window_before = int(val_cfg.get("time_window_before", 2))
+        self.time_window_after = int(val_cfg.get("time_window_after", 1))
+        self._capture_time = None
+        self._time_skip_logged = False
         self.skipped_formats = []
         self._last_located = None
         # Second attempt at the print's row angle for a read that failed
@@ -166,6 +200,27 @@ class OCRead:
             for lines in self.skipped_formats:
                 log.warning("OCRead: format %s skipped - the font reader model does not support it", lines)
 
+    def warmup(self):
+        """One read of a synthetic frame (a dark two-line print on grey), so
+        the first real cycles don't pay for first-call costs: OpenCV and
+        numpy code paths, kernels, the worker threads (ocr.speed). Called by
+        the app at startup when ocr.speed.warmup is set. Returns the time in
+        ms; the read itself is thrown away."""
+        t = time.perf_counter()
+        frame = np.full((480, 744, 3), 170, np.uint8)
+        for y, line in ((220, "6274 10:29"), (262, "BB 05/28")):
+            cv2.putText(frame, line, (250, y), cv2.FONT_HERSHEY_PLAIN, 2.4, (60, 60, 60), 3)
+        debug_dir, self.dynamic_roi_debug_dir = self.dynamic_roi_debug_dir, None
+        time_check, self.time_check = self.time_check, False    # a synthetic frame has no capture time
+        try:
+            self.read(frame)
+        except Exception as exc:  # pragma: no cover - a warm-up must never stop the app
+            log.warning("OCRead warm-up failed (non-fatal): %s", exc)
+        finally:
+            self.dynamic_roi_debug_dir = debug_dir
+            self.time_check = time_check
+        return round((time.perf_counter() - t) * 1000, 1)
+
     @property
     def validator(self):
         """The first configured format. Assigning one replaces all formats."""
@@ -194,7 +249,7 @@ class OCRead:
         the attempts and step_ms so far as its .attempts / .step_ms.
         prep: the crop's PreparedCrop when the caller has one."""
         reads, attempts = [], []
-        prep = prep or PreparedCrop(crop, deadline)
+        prep = prep or PreparedCrop(crop, deadline, speed=self.speed)
         # More lines first: once a format is trusted, formats with fewer lines
         # can no longer win and are not read (saves a read per cycle). Once a
         # two-line format is accepted (_check passes) with a clearly right
@@ -280,7 +335,14 @@ class OCRead:
             self._last_located = None
             return frame, None
 
-        located = locate_text_region(frame, self.dynamic_roi_cfg, debug_dir=self.dynamic_roi_debug_dir)
+        # speed locate_scale < 1: located on the frame scaled down (the box
+        # mapped back; the crop is cut from the full frame). Retries locate
+        # on the full frame.
+        located = locate_text_region_scaled(frame, dict(self.dynamic_roi_cfg,
+                                                        morph_threads=int(self.speed.get("locate_threads", 1))),
+                                            float(self.speed.get("locate_scale", 1.0)),
+                                            float(self.speed.get("locate_threshold_scale", 1.0)),
+                                            debug_dir=self.dynamic_roi_debug_dir)
         self._last_located = located or None
         if not located:
             log.debug("Dynamic ROI: no text region found on this frame - running OCR on the full frame.")
@@ -337,6 +399,11 @@ class OCRead:
             return REJECT_FORMAT
         if r["confidence"] < self.font_reader.min_digit_confidence:
             return REJECT_CONFIDENCE
+        if (verdict["reason"] is None and self.time_check and self._capture_time is not None
+                and LINE1.match(r["lines"][0])
+                and not plausible_line1(r["lines"][0], self._capture_time, self.time_window_before,
+                                        self.time_window_after)):
+            return REJECT_IMPLAUSIBLE
         return verdict["reason"]
 
     def _retry_crops(self, frame, located, first_prep, deadline):
@@ -392,7 +459,8 @@ class OCRead:
 
         def prepared(rect):
             crop = deskew_crop(frame, rect, extra_padding_px=20)
-            return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline, self.print_ink_ratio)
+            return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline, self.print_ink_ratio,
+                                                          self.speed)
 
         points = located.get("ink_points") if first is not None else None
         if self.row_angle_retry and points is not None and len(points) >= 3:
@@ -460,7 +528,54 @@ class OCRead:
             tried += [dict(a, retry=name) for a in getattr(exc, "attempts", [])]
         return None, tried
 
-    def read(self, frame, profile=False):
+    def _agree(self, frame, crop, box, r, retried, deadline):
+        """Agreement check of an accepted read r in the grey zone: re-read on
+        agreement_reads crops with the read's box moved by AGREEMENT_MOVES
+        (cut from the frame like the read's own crop; without a box - the
+        axis-aligned fallback - the read's crop itself moved). A retry's
+        read is re-read the same way (printed-ink line count). Stops at the
+        first extra read that is not accepted or reads another code.
+
+        Returns (reason, info): reason None (all agree), REJECT_UNSTABLE or
+        REJECT_TIMEOUT (time budget used up); info: the extra reads' codes
+        (None = not accepted) and their time in ms."""
+        t = time.perf_counter()
+        codes, reason = [], None
+        try:
+            for dx, dy, da, scale in AGREEMENT_MOVES[:self.agreement_reads]:
+                if box is not None:
+                    moved = dict(box, center=[box["center"][0] + dx, box["center"][1] + dy], angle=box["angle"] + da,
+                                 size=[box["size"][0] * scale, box["size"][1] * scale])
+                    c = deskew_crop(frame, moved, extra_padding_px=20)
+                    c = None if c is None else self._downscale_roi(c)
+                else:
+                    # The crop itself moved like the box: turned about its
+                    # centre, shifted, and cut scale x as large (the same
+                    # pixel size, more border - replicated, as there is no
+                    # frame to take it from).
+                    h, w = crop.shape[:2]
+                    w2, h2 = int(round(w * scale)), int(round(h * scale))
+                    m = cv2.getRotationMatrix2D((w / 2, h / 2), da, 1.0)
+                    m[:, 2] += ((w2 - w) / 2 - dx, (h2 - h) / 2 - dy)  # the box moves by (dx, dy): the content the other way
+                    c = cv2.warpAffine(crop, m, (w2, h2), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+                code = None
+                if c is not None and c.size:
+                    prep = PreparedCrop(c, deadline, self.print_ink_ratio if retried else None, self.speed)
+                    v2, r2, _, _ = self._read_all_formats(c, deadline, prep)
+                    if self._check(v2, r2) is None:
+                        code = r2["text"]
+                codes.append(code)
+                if code != r["text"]:
+                    reason = REJECT_UNSTABLE
+                    break
+        except ReadTimeout:
+            reason = REJECT_TIMEOUT
+        info = {"codes": codes, "ms": round((time.perf_counter() - t) * 1000, 1)}
+        if reason is not None:
+            log.debug("Agreement check: %s for %r (extra reads %s)", reason, r["text"], codes)
+        return reason, info
+
+    def read(self, frame, profile=False, capture_time=None):
         """
         Read the printed code from the frame.
 
@@ -469,12 +584,18 @@ class OCRead:
         pass for the chosen format; "text" is then the canonical code, e.g.
         "4113 08:26 BB 05/26" or "6286 16:24".
         Otherwise failure_reason is format_mismatch / low_confidence /
-        invalid_value / no_text_detected / timeout and "text" is empty.
+        invalid_value / no_text_detected / timeout / unstable_read and
+        "text" is empty. unstable_read: accepted in the grey zone of digit
+        confidence (agreement_band), but slightly moved crops did not all
+        read the same code (_agree).
 
         no_text_detected straight away when the locator (dynamic ROI) found
         no print: reading the full frame instead took 1.2-1.7 s and never
         gave a code (22 of the 514 test images). timeout: the read was still
         running after ocr.read_validation.time_budget_ms.
+        implausible_time: line 1 is not a print time near capture_time (a
+        datetime: the system clock when the frame was grabbed, or the time in
+        a test image's file name; None = unknown, the check is skipped).
         """
         if self.font_reader is None:
             return {
@@ -486,6 +607,14 @@ class OCRead:
             }
 
         t0 = time.perf_counter()
+        self._capture_time = capture_time
+        if self.time_check and capture_time is None:
+            if not self._time_skip_logged:
+                log.info("OCRead: capture time unknown - line 1 time plausibility check skipped "
+                         "(logged once; per read at debug level)")
+                self._time_skip_logged = True
+            else:
+                log.debug("Capture time unknown: time plausibility check skipped")
         crop, cycle_debug_dir, profile_data, located = self._prepare(frame)
         validator, r, attempts, step_ms, reason = None, None, [], {}, None
         retry_angle, retry_name = None, None
@@ -499,7 +628,7 @@ class OCRead:
                     reason = None
         else:
             deadline = t0 + self.time_budget_ms / 1000.0 if self.time_budget_ms > 0 else None
-            prep = PreparedCrop(crop, deadline)
+            prep = PreparedCrop(crop, deadline, speed=self.speed)
             try:
                 validator, r, attempts, step_ms = self._read_all_formats(crop, deadline, prep)
             except ReadTimeout as exc:
@@ -513,6 +642,11 @@ class OCRead:
                         validator, r, step_ms, retry_name, rect = retry
                         retry_angle = rect["angle"] if retry_name == "row_angle" else None
                         reason = None
+        agreement = None
+        if (reason is None and self.agreement_reads > 0
+                and self.agreement_band[0] <= r["confidence"] < self.agreement_band[1]):
+            box = rect if retry_name else (located or {}).get("rotated_rect")
+            reason, agreement = self._agree(frame, crop, box, r, retry_name is not None, deadline)
         elapsed = (time.perf_counter() - t0) * 1000.0
         accepted = reason is None
         if not accepted and located is None and reason == REJECT_FORMAT:
@@ -532,7 +666,8 @@ class OCRead:
                         "step_ms": {"locate": round(profile_data.get("roi_ms", 0.0), 1), **step_ms},
                         "orientation": ("reversed" if r and r["flipped"] else "normal") if r else None,
                         "format": validator.lines if validator else None, "formats_tried": attempts,
-                        "row_angle_retry": retry_angle, "retry": retry_name}
+                        "row_angle_retry": retry_angle, "retry": retry_name, "agreement": agreement,
+                        "capture_time": capture_time.isoformat(timespec="seconds") if capture_time else None}
         if cycle_debug_dir:
             try:
                 os.makedirs(cycle_debug_dir, exist_ok=True)
