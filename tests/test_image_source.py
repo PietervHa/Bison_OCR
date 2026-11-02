@@ -268,5 +268,23 @@ class AutoplayTests(unittest.TestCase):
         self.assertFalse(client.post("/test_images/pause").json()["paused"])
         self.assertEqual(TestClient(create_app(_LiveCam(), AppState())).post("/test_images/pause").status_code, 409)
 
+
+class StepOnTriggerTests(unittest.TestCase):
+    def test_each_trigger_reads_the_next_image(self):
+        import tempfile
+        from backend.core.tcp_trigger_server import TCPTriggerServer
+        with tempfile.TemporaryDirectory() as d:
+            for name, v in (("a.png", 10), ("b.png", 20), ("c.png", 30)):
+                cv2.imwrite(str(Path(d) / name), np.full((40, 60, 3), v, np.uint8))
+            src = ImageFolderSource(d)
+            seen = []
+            srv = TCPTriggerServer(src, run_vision_fn=None, process_result_fn=None, step_images_on_trigger=True)
+            for _ in range(3):
+                if srv.step_images_on_trigger:
+                    src.step(+1)
+                seen.append(int(src.get_frame()[0, 0, 0]))
+            self.assertEqual(seen, [20, 30, 10])          # a -> b -> c -> wraps to a
+            self.assertFalse(TCPTriggerServer(_LiveCam(), None, None, step_images_on_trigger=True).step_images_on_trigger)
+
 if __name__ == "__main__":
     unittest.main()
