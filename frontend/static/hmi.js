@@ -38,7 +38,7 @@ async function updateResult() {
                 ocreadTextEl.textContent = result.text || "-";
             } else if (result.failure_reason === "no_text_detected") {
                 ocreadTextEl.textContent = "(no text detected)";
-            } else if (["format_mismatch", "low_confidence", "invalid_value", "text_too_long"].includes(result.failure_reason)) {
+            } else if (["format_mismatch", "low_confidence", "invalid_value", "unstable_read", "implausible_time", "text_too_long"].includes(result.failure_reason)) {
                 // Read was made but not accepted (read_validation): show why,
                 // plus what was read, so operators can see what it struggled with.
                 ocreadTextEl.textContent = `(not accepted: ${result.failure_reason}) ${result.text || ""}`.trim();
@@ -195,6 +195,7 @@ function showTestImageInfo(st) {
     el.textContent = st.count
         ? `Test image ${st.index}/${st.count}: ${st.name}   (\u2190 \u2192 to step)`
         : `No images in ${st.folder}`;
+    if (st.unreadable) el.textContent += `   - could not read ${st.unreadable}, showing previous image`;
 }
 
 async function initTestImages() {

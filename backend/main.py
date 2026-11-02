@@ -15,7 +15,7 @@ from pathlib import Path
 
 from backend.core.camera import Camera
 from backend.core.image_source import ImageFolderSource
-from backend.core.vision import run_vision, bind_app_state
+from backend.core.vision import run_vision, bind_app_state, capture_time_of
 from backend.core.tcp_trigger_server import TCPTriggerServer
 from frontend.web import create_app
 from backend.core.state import AppState
@@ -111,6 +111,7 @@ def start_vision_cycle(camera, app_state) -> bool:
     if _vision_busy.is_set():
         return False
     frame = camera.get_frame()
+    captured = capture_time_of(camera)
     if frame is None:
         log.warning("No frame available; reporting NOK")
 
@@ -129,7 +130,7 @@ def start_vision_cycle(camera, app_state) -> bool:
 
     _vision_busy.set()
     try:
-        run_vision(frame, callback=_callback)  # background thread, calls _callback
+        run_vision(frame, callback=_callback, capture_time=captured)  # background thread, calls _callback
     except Exception:
         cycle_done.set()
         _vision_busy.clear()

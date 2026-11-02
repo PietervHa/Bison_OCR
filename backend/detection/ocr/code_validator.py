@@ -75,6 +75,46 @@ REJECT_FORMAT = "format_mismatch"
 REJECT_CONFIDENCE = "low_confidence"
 REJECT_VALUE = "invalid_value"
 REJECT_TIMEOUT = "timeout"
+# The read was accepted with a digit confidence in the grey zone and slightly
+# moved crops did not all give the same code (OCRead agreement check).
+REJECT_UNSTABLE = "unstable_read"
+# Line 1 (year digit + day of year, HH:MM) is not the print time of a bottle
+# captured at this moment (plausible_line1).
+REJECT_IMPLAUSIBLE = "implausible_time"
+# Line 1 of every format: year digit, day of year, HH:MM.
+LINE1 = re.compile(r"^(\d)(\d{3}) (\d{2}):(\d{2})$")
+
+
+def line1_offset_min(line1: str, capture: datetime.datetime):
+    """Minutes from the capture minute (capture time, seconds dropped) to
+    the print time line 1 stands for - e.g. +1 for "6274 06:33" captured at
+    06:32:50 on 1-10-2026. The year is the one nearest the capture year with
+    that last digit; the day and time run on across midnight, so "6274
+    23:59" captured at 00:00:30 on 2-10-2026 is -1. None when line 1 is not
+    a date and time: not the LINE1 pattern, day 0 or past the year's end,
+    hour > 23, minute > 59, or no year with that digit within a year."""
+    m = LINE1.match(line1 or "")
+    if not m:
+        return None
+    digit, doy, hh, mm = (int(g) for g in m.groups())
+    years = [y for y in (capture.year - 1, capture.year, capture.year + 1) if y % 10 == digit]
+    if not years or hh > 23 or mm > 59:
+        return None
+    year = years[0]
+    days = (datetime.date(year + 1, 1, 1) - datetime.date(year, 1, 1)).days
+    if not 1 <= doy <= days:
+        return None
+    printed = datetime.datetime(year, 1, 1) + datetime.timedelta(days=doy - 1, hours=hh, minutes=mm)
+    return int((printed - capture.replace(second=0, microsecond=0)).total_seconds() // 60)
+
+
+def plausible_line1(line1: str, capture: datetime.datetime, before_min: int, after_min: int) -> bool:
+    """Line 1 is a print time from before_min minutes before the capture
+    minute up to after_min minutes after it (the printer's and the vision
+    PC's clocks are in sync - NTP - but printing, transport and the minute
+    boundary leave a minute or two). Not a date and time: implausible."""
+    off = line1_offset_min(line1, capture)
+    return off is not None and -before_min <= off <= after_min
 
 # "BB 05/28", "EXP 05/28" in a canonical code: group 1 is the year YY.
 EXPIRY_DATE = re.compile(r"(?:^| )(?:BB|EXP) (?:\d{2})/(\d{2})(?= |$)")

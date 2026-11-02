@@ -123,7 +123,7 @@ def main(argv=None):
         img = load_image(p, max_width)
         if img is None:
             skipped["unreadable file"] += 1; continue
-        result = engine.read(img)
+        result = engine.read(img, capture_time=t)        # as test-image mode: the time in the file name
         expected = expected_texts(t, args.date, formats)
         kind, text, fmt = outcome(result, expected)
         read = ((result.get("validation") or {}).get("reads") or [{}])[0]

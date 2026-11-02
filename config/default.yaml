@@ -76,6 +76,34 @@ ocr:
     # the print) stops and is NOK with failure_reason "timeout", never a
     # code. On the 514 test images the slowest read is ~1.2 s. 0 = no limit.
     time_budget_ms: 1500
+    # Agreement check (engine.py, OCRead._agree): a read accepted with its
+    # lowest digit confidence in [agreement_band[0], agreement_band[1]) is
+    # read again on agreement_reads crops with the box the read was made on
+    # moved by fixed steps (AGREEMENT_MOVES, at most 4, in order): shifted
+    # +2/-2 px, turned +1 deg, made 3% larger, turned -1 deg. OK only when
+    # every one of them is accepted with exactly the same code; else NOK
+    # "unstable_read". Within time_budget_ms. 0 reads = off. With 2 reads
+    # (+/-2 px with +/-1 deg) 3 of 5140 stress-test reads still agreed on a
+    # wrong code.
+    agreement_band: [0.7, 0.98]
+    agreement_reads: 2
+    # Time plausibility of line 1 (engine.py, code_validator.plausible_line1):
+    # the year digit + day of year and HH:MM must be a print time within
+    # [capture - time_window_before, capture + time_window_after] minutes of
+    # the capture minute (across midnight too: "23:59" of the previous day
+    # at 00:00:30 is -1); otherwise NOK "implausible_time". On the 514 test
+    # images all 502 correct reads were printed at capture -1, 0 or +1 min;
+    # in the stress test the reads still accepted WRONG after the agreement
+    # check were -8 and +2 min ("06:20" at 06:28:19, "06:34" at 06:32:50).
+    # Capture time: live camera = the system clock when the frame was
+    # grabbed; test images = the time in the file name
+    # (backend/utils/capture_time.py); unknown = check skipped (logged).
+    # The printer's and this PC's clocks MUST be in sync (NTP on both):
+    # a clock off by more than the window makes every read NOK.
+    # false = off.
+    time_check: true
+    time_window_before: 2
+    time_window_after: 1
     font_reader:
       model: ''                   # '' = backend/detection/ocr/models/font_reader.npz
       # To check on the line that it READS rather than recalls known codes:
@@ -91,11 +119,15 @@ ocr:
       min_literal_score: -1.0
       # Every digit at least this confident. Calibrated on the 514 test
       # images: the lowest wrong read accepted at 0.0 had 0.632 ("06:20"
-      # for 06:27), the next correct read 0.745; 0.7 sits in that gap and
-      # costs one correct read (at 0.192). Higher values only cost more
-      # correct reads (0.8: 2, 0.9: 3, 0.95: 5) and catch no more wrong
-      # ones. (Earlier, on unseen bottles: 0.0 = 73 correct / 6 wrong / 4
-      # rejected, 0.5 = 58/1/24.)
+      # for 06:27), the next correct read 0.745; 0.7 sits in that gap.
+      # Reads from 0.7 up to 0.98 must also pass the agreement check
+      # (agreement_band above): a stress test (each image read 10 times
+      # with the located box shifted +/-2 px, scaled +/-3%, turned +/-1 deg)
+      # found 5 of 5140 reads accepted WRONG, all at 0.946-0.972, while
+      # correct reads had p1 0.975. A plain gate of 0.98 stopped them but
+      # also rejected correct reads down to 0.917 - among them the cap rib
+      # through the "6" (tests/fixtures/font_reader/4113_rib_through_6.png,
+      # 0.918).
       min_digit_confidence: 0.7
     # The print formats the line uses; each is a list with one entry per
     # printed line. # = digit, A = letter, * = any character, space = gap
@@ -321,7 +353,7 @@ ocr:
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
     # tuning the thresholds above against real bottles, but leave off in
     # normal production since it writes a file per cycle.
-    debug_save: true
+    debug_save: false
     debug_dir: "data/debug/dynamic_roi"
 
 # Camera settings
@@ -388,6 +420,9 @@ camera:
     # Fixed exposure and gain once auto is off. Start with gain at 0.
     exposure: -6
     gain: 0
+
+    # Time to wait between automatically playing images (in seconds). 0 = no auto-play.
+    images_autoplay_s: 1.0   # 0 = uit
 
     # White balance. Only matters because text_locator picks a colour
     # channel; leaving WB on auto lets that channel's contrast wander.

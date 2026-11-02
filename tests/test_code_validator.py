@@ -164,5 +164,49 @@ class VisionStatusTests(unittest.TestCase):
         self.assertEqual((n["status"], n["failure_reason"]), ("NOK", "format_mismatch"))
 
 
+
+class Line1PlausibilityTests(unittest.TestCase):
+    """Line 1 (year digit + day of year, HH:MM) against the capture time."""
+
+    def test_offset_from_the_capture_minute(self):
+        from backend.detection.ocr.code_validator import line1_offset_min
+        t = datetime.datetime(2026, 10, 1, 6, 32, 50)              # 1-10-2026 = day 274
+        self.assertEqual(line1_offset_min("6274 06:33", t), 1)
+        self.assertEqual(line1_offset_min("6274 06:32", t), 0)
+        self.assertEqual(line1_offset_min("6274 06:34", t), 2)      # the stress test's WRONG "06:34"
+        self.assertEqual(line1_offset_min("6274 06:20", datetime.datetime(2026, 10, 1, 6, 28, 19)), -8)
+
+    def test_across_midnight_and_year_end(self):
+        from backend.detection.ocr.code_validator import line1_offset_min
+        self.assertEqual(line1_offset_min("6274 23:59", datetime.datetime(2026, 10, 2, 0, 0, 30)), -1)
+        self.assertEqual(line1_offset_min("6275 00:00", datetime.datetime(2026, 10, 1, 23, 59, 40)), 1)
+        self.assertEqual(line1_offset_min("6365 23:59", datetime.datetime(2027, 1, 1, 0, 0, 10)), -1)
+        self.assertEqual(line1_offset_min("7001 00:00", datetime.datetime(2026, 12, 31, 23, 59, 50)), 1)
+
+    def test_not_a_date_and_time(self):
+        from backend.detection.ocr.code_validator import line1_offset_min
+        t = datetime.datetime(2026, 10, 1, 6, 32, 50)
+        for line1 in ("6000 06:32", "6366 06:32", "6274 24:00", "6274 06:60", "2274 06:32", "6274 0632", ""):
+            with self.subTest(line1=line1):
+                self.assertIsNone(line1_offset_min(line1, t))
+
+    def test_window(self):
+        from backend.detection.ocr.code_validator import plausible_line1
+        t = datetime.datetime(2026, 10, 1, 6, 32, 50)
+        self.assertEqual([plausible_line1(f"6274 06:{m}", t, 2, 1) for m in (29, 30, 31, 32, 33, 34)],
+                         [False, True, True, True, True, False])
+        self.assertFalse(plausible_line1("6274 25:00", t, 2, 1))
+
+
+class CaptureTimeFromNameTests(unittest.TestCase):
+    def test_names(self):
+        from backend.utils.capture_time import from_name
+        self.assertEqual(from_name("data/test_images/UId_0_Time_1-10-2026_6-32-50_738.jpg"),
+                         datetime.datetime(2026, 10, 1, 6, 32, 50))
+        self.assertEqual(from_name("20261030_143205_123"), datetime.datetime(2026, 10, 30, 14, 32, 5))
+        for name in ("4113_rib_through_6.png", "UId_0_Time_31-9-2026_6-32-50_1.jpg", "frame.png"):
+            with self.subTest(name=name):
+                self.assertIsNone(from_name(name))
+
 if __name__ == "__main__":
     unittest.main()

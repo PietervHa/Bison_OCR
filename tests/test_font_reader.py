@@ -811,6 +811,99 @@ class SharedFormatWorkTests(unittest.TestCase):
 
 
 
+
+class OCReadAgreementTests(unittest.TestCase):
+    """A read accepted in the grey zone of digit confidence (agreement_band)
+    is re-read on slightly moved crops and only accepted when they all read
+    the same code; above the band it is accepted as it is."""
+
+    def _engine(self, first, later):
+        e = OCReadRowAngleRetryTests._engine(self, first, later, box_angle=0.0)
+        e.agreement_band, e.agreement_reads = (0.7, 0.98), 2
+        return e
+
+    def _frame(self):
+        return np.full((480, 744, 3), 190, np.uint8)
+
+    def test_grey_zone_read_whose_moved_crops_agree_is_accepted(self):
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=0.918)},
+                         {tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=0.95)})
+        r = e.read(self._frame())
+        self.assertEqual(r["text"], "6288 13:19 BB 05/28")
+        self.assertEqual(r["validation"]["reads"][0]["agreement"]["codes"], ["6288 13:19 BB 05/28"] * 2)
+        self.assertEqual(len(e.font_reader.crops), 3)
+
+    def test_grey_zone_read_whose_moved_crops_disagree_is_unstable(self):
+        # 1-10-2026_6-32-50_738 in the stress test: "06:34" for 06:33 at 0.954.
+        e = self._engine({tuple(TPL): _res("6274 06:34", "BB 05/28", lit=0.0, conf=0.954)},
+                         {tuple(TPL): _res("6274 06:33", "BB 05/28", lit=0.0, conf=1.0)})
+        r = e.read(self._frame())
+        self.assertEqual((r["failure_reason"], r["text"], r["detections"]), ("unstable_read", "", []))
+        self.assertEqual(r["validation"]["reads"][0]["agreement"]["codes"], ["6274 06:33 BB 05/28"])
+
+    def test_moved_crop_that_is_not_accepted_makes_the_read_unstable(self):
+        e = self._engine({tuple(TPL): _res("6274 06:20", "BB 05/28", lit=0.0, conf=0.972)}, {})
+        self.assertEqual(e.read(self._frame())["failure_reason"], "unstable_read")
+
+    def test_confident_read_is_not_read_again(self):
+        e = self._engine({tuple(TPL): _res("6288 13:19", "BB 05/28", lit=0.0, conf=0.99)},
+                         {tuple(TPL): _res("6288 13:19", "BB 06/28", lit=0.0, conf=1.0)})
+        r = e.read(self._frame())
+        self.assertEqual(r["text"], "6288 13:19 BB 05/28")
+        self.assertIsNone(r["validation"]["reads"][0]["agreement"])
+        self.assertEqual(len(e.font_reader.crops), 1)
+
+
+class OCReadTimePlausibilityTests(unittest.TestCase):
+    """Line 1 must be a print time near the capture time; unknown capture
+    time = the check is skipped."""
+
+    def _engine(self, result):
+        from backend.detection.ocread import engine
+        e = engine.OCRead()
+        e.dynamic_roi_debug_dir = None
+        e.validators = [engine.CodeTemplate(TPL, value_pattern=VALUE_PATTERN)]
+        e.skipped_formats = []
+        e.font_reader = _PerFormatReader({tuple(TPL): result})
+        e.time_check, e.time_window_before, e.time_window_after = True, 2, 1
+        return _print_found(e)
+
+    def _frame(self):
+        return np.full((480, 744, 3), 190, np.uint8)
+
+    def test_print_time_near_the_capture_time_is_accepted(self):
+        import datetime
+        r = self._engine(_res("6274 06:33", "BB 05/28")).read(
+            self._frame(), capture_time=datetime.datetime(2026, 10, 1, 6, 32, 50))
+        self.assertEqual(r["text"], "6274 06:33 BB 05/28")
+        self.assertEqual(r["validation"]["reads"][0]["capture_time"], "2026-10-01T06:32:50")
+
+    def test_print_time_outside_the_window_is_implausible(self):
+        import datetime
+        from backend.core import vision
+        r = self._engine(_res("6274 06:34", "BB 05/28")).read(
+            self._frame(), capture_time=datetime.datetime(2026, 10, 1, 6, 32, 50))
+        self.assertEqual((r["failure_reason"], r["text"], r["detections"]), ("implausible_time", "", []))
+        n = vision._normalize_result(r)
+        self.assertEqual((n["status"], n["failure_reason"]), ("NOK", "implausible_time"))
+
+    def test_unknown_capture_time_or_check_off_skips_the_check(self):
+        import datetime
+        e = self._engine(_res("6274 06:34", "BB 05/28"))
+        self.assertEqual(e.read(self._frame())["text"], "6274 06:34 BB 05/28")
+        e.time_check = False
+        self.assertEqual(e.read(self._frame(), capture_time=datetime.datetime(2026, 10, 1, 6, 32, 50))["text"],
+                         "6274 06:34 BB 05/28")
+
+    def test_test_image_mode_passes_the_file_name_time(self):
+        import datetime, tempfile
+        from backend.core import vision
+        from backend.core.image_source import ImageFolderSource
+        with tempfile.TemporaryDirectory() as d:
+            cv2.imwrite(str(Path(d) / "UId_0_Time_1-10-2026_6-32-50_738.jpg"), np.zeros((8, 8, 3), np.uint8))
+            src = ImageFolderSource(d)
+            self.assertEqual(vision.capture_time_of(src), datetime.datetime(2026, 10, 1, 6, 32, 50))
+
 class CompiledGridSearchTests(unittest.TestCase):
     """ocr.speed.grid_jit: the numba search (optional dependency) gives
     exactly the grids and scores of the exhaustive per-pitch search; without
