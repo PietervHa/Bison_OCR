@@ -353,7 +353,7 @@ ocr:
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
     # tuning the thresholds above against real bottles, but leave off in
     # normal production since it writes a file per cycle.
-    debug_save: true
+    debug_save: false
     debug_dir: "data/debug/dynamic_roi"
 
 # Camera settings

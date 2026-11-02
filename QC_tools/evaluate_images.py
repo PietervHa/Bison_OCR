@@ -22,7 +22,7 @@ Reports, per format the engine read (for a NOK: the format of its closest
 rejected read, or "none") and in total: correct OK, WRONG OK, NOK with the
 reasons, and the average and maximum time per image (the engine's
 processing_time_ms: locate + read). The WRONG reads are listed with what was
-read and what was expected. The JSON report (--report) also has every
+read and what was expected. --save-nok DIR copies the NOK/WRONG images with overview sheets.\nThe JSON report (--report) also has every
 image's read (text, outcome, reason, literal score, digit confidence,
 formats tried), to compare two runs image by image.
 
@@ -95,6 +95,44 @@ def summarize(rows):
     return out
 
 
+def save_nok(rows, paths, outdir, per_sheet=24, cols=4, width=420):
+    """Copy NOK/WRONG images to outdir/<reason>/ and write overview sheets:
+    each tile = the image, its file name, outcome + reason, what was read
+    (WRONG) and the expected code(s) from the file name."""
+    import shutil
+    import numpy as np
+    bad = [r for r in rows if r["outcome"] in ("NOK", "WRONG")]
+    tiles = []
+    for r in bad:
+        reason = "WRONG" if r["outcome"] == "WRONG" else (r["reason"] or "unknown")
+        dest = outdir / str(reason)
+        dest.mkdir(parents=True, exist_ok=True)
+        src = paths[r["image"]]
+        shutil.copy2(src, dest / src.name)
+        img = cv2.imdecode(np.fromfile(str(src), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            img = np.full((300, width, 3), 200, np.uint8)
+        img = cv2.resize(img, (width, max(1, round(img.shape[0] * width / img.shape[1]))), interpolation=cv2.INTER_AREA)
+        exp = [e for e in r["expected"] if fmt_of(e) == r["format"]] or r["expected"]
+        lines = [src.stem.replace("UId_0_Time_", ""),
+                 f"{r['outcome']}: {reason}" + (f"  read {r['text']}" if r["outcome"] == "WRONG" else ""),
+                 "expected: " + " | ".join(exp[:2])]
+        band = np.full((16 * len(lines) + 6, width, 3), 255, np.uint8)
+        for k, t in enumerate(lines):
+            cv2.putText(band, t[:58], (4, 15 + 16 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                        (0, 0, 200) if k == 1 else (0, 0, 0), 1, cv2.LINE_AA)
+        tiles.append(np.vstack([band, img]))
+    for sheet, start in enumerate(range(0, len(tiles), per_sheet), 1):
+        chunk = tiles[start:start + per_sheet]
+        h = max(t.shape[0] for t in chunk)
+        chunk = [cv2.copyMakeBorder(t, 0, h - t.shape[0] + 6, 0, 6, cv2.BORDER_CONSTANT, value=(255, 255, 255)) for t in chunk]
+        while len(chunk) % cols:
+            chunk.append(np.full_like(chunk[0], 255))
+        grid = np.vstack([np.hstack(chunk[i:i + cols]) for i in range(0, len(chunk), cols)])
+        cv2.imwrite(str(outdir / f"nok_overview_{sheet}.jpg"), grid, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return len(bad)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("images", type=Path)
@@ -102,6 +140,9 @@ def main(argv=None):
                     help="date on line 2 of BB and EXP, e.g. 05/28 (PROD: month/year of the capture date)")
     ap.add_argument("--report", type=Path, default=None, help="also write the report as JSON")
     ap.add_argument("--first", type=int, default=0, help="only the first N images (in file name order; 0 = all)")
+    ap.add_argument("--save-nok", type=Path, default=None, metavar="DIR",
+                    help="copy every NOK and WRONG image to DIR/<reason>/ and write overview sheets "
+                         "(image + reason + expected code) to check whether a NOK was a bad print or a miss")
     args = ap.parse_args(argv)
 
     from backend.core.config_loader import cfg
@@ -116,6 +157,7 @@ def main(argv=None):
     if args.first > 0:
         files = files[:args.first]
     rows, skipped = [], Counter()
+    paths = {}
     for i, p in enumerate(files, 1):
         t = capture_time(p)
         if t is None:
@@ -127,6 +169,7 @@ def main(argv=None):
         expected = expected_texts(t, args.date, formats)
         kind, text, fmt = outcome(result, expected)
         read = ((result.get("validation") or {}).get("reads") or [{}])[0]
+        paths[p.name] = p
         rows.append({"image": p.name, "outcome": kind, "format": fmt, "text": text,
                      "reason": result.get("failure_reason") or result.get("error"),
                      "expected": sorted(expected), "ms": float(result.get("processing_time_ms") or 0.0),
@@ -163,6 +206,9 @@ def main(argv=None):
         print(f"\nWRONG ({len(wrong)}):")
         for w in wrong:
             print(f"  {w['image']}: read {w['read']!r}, expected {' | '.join(w['expected'])}")
+    if args.save_nok:
+        n_saved = save_nok(rows, paths, args.save_nok)
+        print(f"\n{n_saved} NOK/WRONG image(s) saved to {args.save_nok} (see nok_overview_*.jpg)")
     if args.report:
         args.report.write_text(json.dumps(report, indent=1))
     return 0
