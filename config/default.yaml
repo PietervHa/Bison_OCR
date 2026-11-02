@@ -467,6 +467,7 @@ web:
 # Output settings
 output:
   result_dir: "data/results"
+  result_keep_days: 30      # delete daily results files older than this (0 = keep all)
 
 # TCP trigger settings (PLC)
 trigger:
