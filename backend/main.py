@@ -156,6 +156,21 @@ def vision_trigger_loop(camera, app_state):
             log.error("Vision trigger loop error: %s", exc)
 
 
+def test_image_autoplay_loop(camera, app_state):
+    """Test-image mode: step to the next image every camera.images_autoplay_s
+    seconds and read it. A manual step (arrow keys) restarts the countdown,
+    space on the HMI pauses it, and while a read is still running the step
+    waits - so the image on screen and the result always belong together."""
+    while True:
+        time.sleep(0.05)
+        try:
+            if camera.autoplay_due() and not _vision_busy.is_set():
+                camera.step(+1)
+                start_vision_cycle(camera, app_state)
+        except Exception as exc:
+            log.error("Test-image autoplay error: %s", exc)
+
+
 def make_frame_source(app_state):
     """The camera, or still images from a folder (camera.source: "images")."""
     cam_cfg = cfg.get("camera", {}) or {}
@@ -165,7 +180,8 @@ def make_frame_source(app_state):
             folder = Path(__file__).resolve().parents[1] / folder
         log.info("Frame source: test images from %s (arrow keys on the HMI)", folder)
         return ImageFolderSource(folder, app_state=app_state,
-                                 max_width=cam_cfg.get("images_max_width", 744))
+                                 max_width=cam_cfg.get("images_max_width", 744),
+                                 autoplay_s=cam_cfg.get("images_autoplay_s", 0))
     return Camera(0, app_state=app_state)
 
 
@@ -197,6 +213,12 @@ def main():
             daemon=True,
         )
         web_thread.start()
+
+        if isinstance(camera, ImageFolderSource) and camera.autoplay_s > 0:
+            threading.Thread(target=test_image_autoplay_loop, args=(camera, app_state),
+                             name="test-image-autoplay", daemon=True).start()
+            log.info("Test images: auto-advance every %.1f s (arrow keys still step, space pauses)",
+                     camera.autoplay_s)
 
         display_host = "127.0.0.1" if web_cfg["host"] in ("0.0.0.0", "127.0.0.1", "localhost") else web_cfg["host"]
         log.info("Web dashboard: http://%s:%s", display_host, web_cfg["port"])

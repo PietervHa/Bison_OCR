@@ -196,6 +196,31 @@ function showTestImageInfo(st) {
         ? `Test image ${st.index}/${st.count}: ${st.name}   (\u2190 \u2192 to step)`
         : `No images in ${st.folder}`;
     if (st.unreadable) el.textContent += `   - could not read ${st.unreadable}, showing previous image`;
+    if (st.autoplay_s > 0) {
+        el.textContent += st.paused
+            ? `   [auto-advance paused - space to resume]`
+            : `   [auto every ${st.autoplay_s} s - space to pause]`;
+    }
+}
+
+// Auto-advance runs in the app itself, so refresh the line regularly.
+async function refreshTestImageInfo() {
+    if (!TEST_IMAGES_ACTIVE || TEST_IMAGE_STEP_BUSY) return;
+    try {
+        const res = await fetch("/test_images", { cache: "no-store" });
+        if (res.ok) showTestImageInfo(await res.json());
+    } catch (e) {
+        // ignore; the next refresh tries again
+    }
+}
+
+async function toggleTestImagePause() {
+    try {
+        const res = await fetch("/test_images/pause", { method: "POST" });
+        if (res.ok) showTestImageInfo(await res.json());
+    } catch (e) {
+        console.error("Failed to pause/resume auto-advance:", e);
+    }
 }
 
 async function initTestImages() {
@@ -204,6 +229,7 @@ async function initTestImages() {
         const st = await res.json();
         TEST_IMAGES_ACTIVE = st.source === "images";
         showTestImageInfo(st);
+        if (TEST_IMAGES_ACTIVE) setInterval(refreshTestImageInfo, 300);
     } catch (e) {
         console.error("Failed to load test image status:", e);
     }
@@ -232,6 +258,7 @@ document.addEventListener("keydown", (e) => {
     if (tag === "INPUT" || tag === "TEXTAREA" || document.querySelector(".modal-overlay:not([hidden])")) return;
     if (e.key === "ArrowRight") { e.preventDefault(); stepTestImage("next"); }
     if (e.key === "ArrowLeft") { e.preventDefault(); stepTestImage("prev"); }
+    if (e.key === " " || e.code === "Space") { e.preventDefault(); toggleTestImagePause(); }
 });
 
 async function init() {

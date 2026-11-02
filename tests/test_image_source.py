@@ -220,5 +220,53 @@ class TestImageRoutesTests(unittest.TestCase):
         self.assertEqual(client.post("/test_images/next").status_code, 409)
 
 
+
+class AutoplayTests(unittest.TestCase):
+    """Auto-advance (camera.images_autoplay_s)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        for name, v in (("a.png", 10), ("b.png", 20)):
+            cv2.imwrite(str(Path(self.tmp.name) / name), np.full((40, 60, 3), v, np.uint8))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_off_by_default(self):
+        src = ImageFolderSource(self.tmp.name)
+        self.assertFalse(src.autoplay_due())
+        self.assertEqual(src.status()["autoplay_s"], 0.0)
+
+    def test_due_after_interval_and_manual_step_restarts_countdown(self):
+        import time
+        src = ImageFolderSource(self.tmp.name, autoplay_s=0.2)
+        self.assertFalse(src.autoplay_due())
+        time.sleep(0.25)
+        self.assertTrue(src.autoplay_due())
+        src.step(+1)                                   # e.g. an arrow key
+        self.assertFalse(src.autoplay_due())
+
+    def test_pause_and_resume(self):
+        import time
+        src = ImageFolderSource(self.tmp.name, autoplay_s=0.1)
+        time.sleep(0.15)
+        st = src.set_paused()                          # toggle -> paused
+        self.assertTrue(st["paused"])
+        self.assertFalse(src.autoplay_due())
+        st = src.set_paused()                          # toggle -> resumed, full interval again
+        self.assertFalse(st["paused"])
+        self.assertFalse(src.autoplay_due())
+        time.sleep(0.15)
+        self.assertTrue(src.autoplay_due())
+
+    @unittest.skipUnless(HAVE_CLIENT, "pip install httpx to run the web tests")
+    def test_pause_route(self):
+        src = ImageFolderSource(self.tmp.name, autoplay_s=1.0)
+        client = TestClient(create_app(src, AppState()))
+        self.assertTrue(client.post("/test_images/pause").json()["paused"])
+        self.assertFalse(client.post("/test_images/pause").json()["paused"])
+        self.assertEqual(TestClient(create_app(_LiveCam(), AppState())).post("/test_images/pause").status_code, 409)
+
 if __name__ == "__main__":
     unittest.main()

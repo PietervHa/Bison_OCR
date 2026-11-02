@@ -27,6 +27,7 @@ source as disconnected.
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -43,10 +44,16 @@ _ROTATE = {1: cv2.ROTATE_90_CLOCKWISE, 2: cv2.ROTATE_180, 3: cv2.ROTATE_90_COUNT
 
 
 class ImageFolderSource:
-    def __init__(self, folder, app_state=None, max_width=744):
+    def __init__(self, folder, app_state=None, max_width=744, autoplay_s=0.0):
         self.folder = Path(folder)
         self.app_state = app_state
         self.max_width = int(max_width or 0)
+        # Auto-advance (camera.images_autoplay_s): step to the next image every
+        # autoplay_s seconds; 0 = off. Every step (manual or automatic)
+        # restarts the countdown, and paused stops it until resumed.
+        self.autoplay_s = max(0.0, float(autoplay_s or 0))
+        self.paused = False
+        self._last_step = time.monotonic()
         self._lock = threading.Lock()
         self._files: list[Path] = []
         self._index = 0
@@ -108,6 +115,20 @@ class ImageFolderSource:
             if self._files:
                 self._index = (self._index + int(delta)) % len(self._files)
             self._load()
+            self._last_step = time.monotonic()
+        return self.status()
+
+    def autoplay_due(self) -> bool:
+        """True when auto-advance is on, not paused, and the interval since
+        the last step (manual or automatic) has passed."""
+        return (self.autoplay_s > 0 and not self.paused and bool(self._files)
+                and time.monotonic() - self._last_step >= self.autoplay_s)
+
+    def set_paused(self, paused=None) -> dict:
+        """Pause/resume auto-advance (None = toggle); returns status()."""
+        self.paused = (not self.paused) if paused is None else bool(paused)
+        if not self.paused:
+            self._last_step = time.monotonic()   # resume with a full interval
         return self.status()
 
     def status(self) -> dict:
@@ -115,7 +136,8 @@ class ImageFolderSource:
             name = self._files[self._index].name if self._files else None
             return {"source": "images", "name": name, "index": self._index + 1 if self._files else 0,
                     "count": len(self._files), "folder": str(self.folder),
-                    "unreadable": self._unreadable}
+                    "unreadable": self._unreadable,
+                    "autoplay_s": self.autoplay_s, "paused": self.paused}
 
     # --- camera interface -------------------------------------------------
     def get_frame(self):

@@ -353,7 +353,7 @@ ocr:
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
     # tuning the thresholds above against real bottles, but leave off in
     # normal production since it writes a file per cycle.
-    debug_save: false
+    debug_save: true
     debug_dir: "data/debug/dynamic_roi"
 
 # Camera settings
@@ -367,6 +367,10 @@ camera:
   source: "images"
   images_dir: "data/test_images"
   images_max_width: 744   # scale larger test images down to the camera's width (0 = keep size)
+  # Auto-advance: step to the next image and read it every N seconds
+  # (0 = off). Arrow keys still step (and restart the countdown), space on
+  # the HMI pauses/resumes. A step waits while a read is still running.
+  images_autoplay_s: 1.0
   device_name: "DFK 22BUC03" # <--- Change this to your camera's device name, Thanks to Peter for the tip'
   index: 0
   # NOTE: the DFK 22BUC03 is a 744x480 sensor - it cannot deliver the
@@ -420,9 +424,6 @@ camera:
     # Fixed exposure and gain once auto is off. Start with gain at 0.
     exposure: -6
     gain: 0
-
-    # Time to wait between automatically playing images (in seconds). 0 = no auto-play.
-    images_autoplay_s: 1.0   # 0 = uit
 
     # White balance. Only matters because text_locator picks a colour
     # channel; leaving WB on auto lets that channel's contrast wander.

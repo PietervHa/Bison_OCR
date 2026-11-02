@@ -153,6 +153,13 @@ def create_app(camera, app_state, start_cycle=None) -> FastAPI:
     def test_images_prev():
         return _step_test_image(-1)
 
+    @app.post("/test_images/pause")
+    def test_images_pause():
+        # Toggles auto-advance (camera.images_autoplay_s); arrow keys keep working.
+        if not hasattr(camera, "set_paused"):
+            return Response(status_code=409, content="Not in test-image mode (camera.source is live)")
+        return camera.set_paused()
+
     @app.get("/camera_status")
     def camera_status(response: Response):
         # Polled by the HMI to drive the "reconnecting..." overlay and the
