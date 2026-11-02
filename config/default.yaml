@@ -373,7 +373,7 @@ camera:
   images_autoplay_s: 1.0
   # PLC test with test images: every TCP/PLC trigger first moves to the next
   # image, like the next bottle arriving. Turns auto-advance off.
-  images_step_on_trigger: true
+  images_step_on_trigger: false
   device_name: "DFK 22BUC03" # <--- Change this to your camera's device name, Thanks to Peter for the tip'
   index: 0
   # NOTE: the DFK 22BUC03 is a 744x480 sensor - it cannot deliver the
