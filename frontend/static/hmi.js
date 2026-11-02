@@ -1,5 +1,3 @@
-let CURRENT_MODE = "production";
-let LAST_APPLIED_MODE = null;
 
 /* =========================
    RESULT POLLING
@@ -40,7 +38,7 @@ async function updateResult() {
                 ocreadTextEl.textContent = result.text || "-";
             } else if (result.failure_reason === "no_text_detected") {
                 ocreadTextEl.textContent = "(no text detected)";
-            } else if (["format_mismatch", "low_confidence", "invalid_value", "text_too_long"].includes(result.failure_reason)) {
+            } else if (["format_mismatch", "low_confidence", "invalid_value", "unstable_read", "implausible_time", "text_too_long"].includes(result.failure_reason)) {
                 // Read was made but not accepted (read_validation): show why,
                 // plus what was read, so operators can see what it struggled with.
                 ocreadTextEl.textContent = `(not accepted: ${result.failure_reason}) ${result.text || ""}`.trim();
@@ -68,11 +66,8 @@ async function updateResult() {
 }
 
 async function loadStatus() {
-    // cache: "no-store" ensures this always hits the server for a fresh
-    // maintenance-access check, rather than a browser-cached /status reply.
     const res = await fetch("/status", { credentials: "same-origin", cache: "no-store" });
     const data = await res.json();
-    CURRENT_MODE = data.maintenance_mode ? "maintenance" : "production";
 
     const machineIdLabel = document.getElementById("machineIdLabel");
     if (machineIdLabel && data.machine_id) {
@@ -150,130 +145,13 @@ function startCameraStatusPolling() {
 }
 
 
-/* =========================
-   MODE HANDLING
-========================= */
-function applyMode() {
-    const banner = document.getElementById("modeBanner");
-    const prodBtn = document.getElementById("startProductionBtn");
-    const maintBtn = document.getElementById("startMaintenanceBtn");
-    const cameraControls = document.getElementById("cameraControls");
-    const cycleTimeSection = document.getElementById("cycleTimeSection");
-    const rotateBtn = document.getElementById("rotateCameraBtn");
-    const resetBtn = document.getElementById("resetBtn");
-
-    if (rotateBtn) {
-        rotateBtn.style.display = CURRENT_MODE === "maintenance" ? "inline-block" : "none";
-    }
-
-    if (CURRENT_MODE === "maintenance") {
-        banner.textContent = "MAINTENANCE MODE";
-        banner.className = "mode-overlay maintenance";
-
-        if (resetBtn) resetBtn.disabled = false;
-        prodBtn.style.display = "inline-block";
-        maintBtn.style.display = "none";
-
-        if (cameraControls) {
-            cameraControls.style.pointerEvents = "auto";
-            cameraControls.style.opacity = "1";
-        }
-
-        if (cycleTimeSection) {
-            cycleTimeSection.style.display = "block";
-        }
-    }
-
-    if (CURRENT_MODE === "production") {
-        banner.textContent = "PRODUCTION MODE";
-        banner.className = "mode-overlay production";
-
-        if (resetBtn) resetBtn.disabled = true;
-        prodBtn.style.display = "none";
-        maintBtn.style.display = "inline-block";
-
-        if (cameraControls) {
-            cameraControls.style.pointerEvents = "none";
-            cameraControls.style.opacity = "0.4";
-        }
-
-        if (cycleTimeSection) {
-            cycleTimeSection.style.display = "none";
-        }
-    }
-
-    LAST_APPLIED_MODE = CURRENT_MODE;
-}
 
 /* =========================
    BUTTON EVENTS
 ========================= */
-document.getElementById("startProductionBtn").addEventListener("click", async () => {
-    const confirmed = await showConfirmDialog({
-        title: "Start Production Mode",
-        message: "Maintenance functions will be locked until maintenance mode is entered again.",
-        confirmLabel: "Start Production",
-        destructive: false
-    });
-    if (!confirmed) return;
 
-    try {
-        const res = await fetch("/maintenance_mode", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ maintenance_mode: false })
-        });
-
-        if (!res.ok) {
-            showToast("Could not switch to production mode.", { type: "error" });
-            return;
-        }
-
-        CURRENT_MODE = "production";
-        applyMode();
-    } catch (e) {
-        console.error("Failed to switch to production mode:", e);
-        showToast("Could not reach the server. Please try again.", { type: "error" });
-    }
-});
-
-document.getElementById("startMaintenanceBtn").addEventListener("click", async () => {
-    const loggedIn = await showLoginDialog(async (password) => {
-        try {
-            const res = await fetch("/maintenance_mode", {
-                method: "POST",
-                credentials: "same-origin",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ maintenance_mode: true, password })
-            });
-
-            if (!res.ok) {
-                let message = "Incorrect password. Access denied.";
-                try {
-                    const errBody = await res.json();
-                    if (errBody && errBody.message) message = errBody.message;
-                } catch (e) {
-                    // response body wasn't JSON; fall back to the generic message above
-                }
-                return { ok: false, message };
-            }
-
-            return { ok: true };
-        } catch (e) {
-            console.error("Failed to enter maintenance mode:", e);
-            return { ok: false, message: "Could not reach the server. Please try again." };
-        }
-    });
-
-    if (!loggedIn) return;
-
-    CURRENT_MODE = "maintenance";
-    applyMode();
-});
 
 document.getElementById("rotateCameraBtn").addEventListener("click", async () => {
-    if (CURRENT_MODE !== "maintenance") return;
     await fetch("/camera_rotation", {
         method: "POST",
         credentials: "same-origin",
@@ -283,7 +161,6 @@ document.getElementById("rotateCameraBtn").addEventListener("click", async () =>
 });
 
 document.getElementById("resetBtn").addEventListener("click", async () => {
-    if (CURRENT_MODE !== "maintenance") return;
     const confirmed = await showConfirmDialog({
         title: "Reset Counters",
         message: "This will reset the OK, NOK, and Total counters to zero. This cannot be undone.",
@@ -293,21 +170,105 @@ document.getElementById("resetBtn").addEventListener("click", async () => {
     if (!confirmed) return;
     const res = await fetch("/reset_counters", { method: "POST", credentials: "same-origin" });
     if (!res.ok) {
-        showToast("Reset failed: not in maintenance mode (session may have expired). Reload the page and try again.", { type: "error" });
+        showToast("Reset failed.", { type: "error" });
     }
 });
 
 /* =========================
     INIT
  ========================= */
+/* =========================
+   TEST IMAGES (camera.source: "images")
+   Left/right arrow keys step through data/test_images; every step runs a read.
+========================= */
+let TEST_IMAGES_ACTIVE = false;
+let TEST_IMAGE_STEP_BUSY = false;
+
+function showTestImageInfo(st) {
+    const el = document.getElementById("testImageInfo");
+    if (!el) return;
+    if (!st || st.source !== "images") {
+        el.style.display = "none";
+        return;
+    }
+    el.style.display = "block";
+    el.textContent = st.count
+        ? `Test image ${st.index}/${st.count}: ${st.name}   (\u2190 \u2192 to step)`
+        : `No images in ${st.folder}`;
+    if (st.unreadable) el.textContent += `   - could not read ${st.unreadable}, showing previous image`;
+    if (st.autoplay_s > 0) {
+        el.textContent += st.paused
+            ? `   [auto-advance paused - space to resume]`
+            : `   [auto every ${st.autoplay_s} s - space to pause]`;
+    }
+}
+
+// Auto-advance runs in the app itself, so refresh the line regularly.
+async function refreshTestImageInfo() {
+    if (!TEST_IMAGES_ACTIVE || TEST_IMAGE_STEP_BUSY) return;
+    try {
+        const res = await fetch("/test_images", { cache: "no-store" });
+        if (res.ok) showTestImageInfo(await res.json());
+    } catch (e) {
+        // ignore; the next refresh tries again
+    }
+}
+
+async function toggleTestImagePause() {
+    try {
+        const res = await fetch("/test_images/pause", { method: "POST" });
+        if (res.ok) showTestImageInfo(await res.json());
+    } catch (e) {
+        console.error("Failed to pause/resume auto-advance:", e);
+    }
+}
+
+async function initTestImages() {
+    try {
+        const res = await fetch("/test_images", { cache: "no-store" });
+        const st = await res.json();
+        TEST_IMAGES_ACTIVE = st.source === "images";
+        showTestImageInfo(st);
+        if (TEST_IMAGES_ACTIVE) setInterval(refreshTestImageInfo, 300);
+    } catch (e) {
+        console.error("Failed to load test image status:", e);
+    }
+}
+
+async function stepTestImage(direction) {
+    if (TEST_IMAGE_STEP_BUSY) return;
+    TEST_IMAGE_STEP_BUSY = true;
+    try {
+        const res = await fetch(`/test_images/${direction}`, { method: "POST" });
+        if (res.ok) {
+            // No reloadCameraFeed(): the open stream already shows the new
+            // image, and each reload opened another /video_feed connection.
+            showTestImageInfo(await res.json());
+        }
+    } catch (e) {
+        console.error("Failed to step test image:", e);
+    } finally {
+        TEST_IMAGE_STEP_BUSY = false;
+    }
+}
+
+document.addEventListener("keydown", (e) => {
+    if (!TEST_IMAGES_ACTIVE) return;
+    const tag = (e.target && e.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || document.querySelector(".modal-overlay:not([hidden])")) return;
+    if (e.key === "ArrowRight") { e.preventDefault(); stepTestImage("next"); }
+    if (e.key === "ArrowLeft") { e.preventDefault(); stepTestImage("prev"); }
+    if (e.key === " " || e.code === "Space") { e.preventDefault(); toggleTestImagePause(); }
+});
+
 async function init() {
     try {
         // Resolve mode first so all downstream behavior is mode-aware.
         await loadStatus();
-        applyMode();
 
         startResultPolling();
         startCameraStatusPolling();
+        initTestImages();
     } catch (e) {
         console.error("Initialization failed:", e);
     }
@@ -321,7 +282,7 @@ window.addEventListener("pageshow", (event) => {
 
 document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
-        loadStatus().then(applyMode);
+        loadStatus();
     }
 });
 

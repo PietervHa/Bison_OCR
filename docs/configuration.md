@@ -2,14 +2,6 @@
 
 All settings are in `config/default.yaml`. Start with `--config <path>` to use another file. `default.yaml` itself has the detailed comments and the measurements behind the values. This page is the overview.
 
-## Secrets (`.env`)
-
-| Variable | Meaning |
-|---|---|
-| `MAINTENANCE_PASSWORD` | Password for maintenance mode on the HMI. Not set or empty: maintenance mode stays locked. |
-
-`.env` lives in the project root and is not committed (see `.env.example`).
-
 ## Top level
 
 | Key | Default | Meaning |
@@ -30,11 +22,14 @@ All settings are in `config/default.yaml`. Start with `--config <path>` to use a
 | `font_reader.model` | `''` | `''` = `backend/detection/ocr/models/font_reader.npz`. Verification models live in `models/verification/` (see below). |
 | `font_reader.min_literal_score` | `-1.0` | `B`, `:` and `/` must look like themselves (mean log-probability). Rejects garbled cuts and wrong orientation as `format_mismatch`. |
 | `font_reader.min_digit_confidence` | `0.0` | Lowest allowed digit confidence, otherwise `low_confidence` |
-| `template` | `["#### ##:##", "BB ##/##"]` | One entry per printed line: `#` digit, `A` letter, `*` any character, space = field gap, anything else literal. The font reader needs exactly two lines. |
-| `value_pattern` | hour/minute/month regex | Regex the canonical code must fully match, otherwise `invalid_value`. `''` disables it. |
+| `templates` | `["#### ##:##", "BB ##/##"]`, `["#### ##:##", "EXP ##/##"]`, `["#### ##:##", "PROD ##/##"]`, `["#### ##:##"]` | The print formats in use. Each format is a list with one entry per printed line: `#` digit, `A` letter, `*` any character, space = field gap, anything else literal. The font reader reads formats of one or two lines. A format with characters the model doesn't know (`E`, `X`, `P`, `R`, `D` with the current model) is skipped with a warning at startup. A literal `O` is scored as `0`: in this dot font they are the same glyph. Digit positions are never mapped. |
+| `template` | – | The older single-format key, e.g. `["#### ##:##", "BB ##/##"]`. Only used when `templates` is absent. |
+| `value_pattern` | hour/minute/month regex, `BB`/`EXP`/`PROD` line optional | Regex the canonical code must fully match, for every format, otherwise `invalid_value`. `''` disables it. |
 | `min_confidence`, `max_corrections`, `max_ignored_tokens` | `0.80`, `1`, `3` | Template-matching settings of `code_validator.py`. The font reader's lines are checked at confidence 1.0, so `min_confidence` never rejects them. |
 
-If the font reader can't be loaded, or doesn't support the template, the app still starts and logs an error. Every read is then NOK with `failure_reason: ocr_engine_error`.
+**Choosing the format**: every supported format is read on the same crop. Of the trusted reads (`min_literal_score` and `min_digit_confidence` pass), the format with more lines wins, then the higher `literal_score`. A two-line print is never accepted as the single-line format: when a two-line format is trusted it wins, and the font reader refuses to read a one-line format on a crop that holds two lines. The chosen format is in `validation.format` of the result and in the `VISION RESULT` log line. Formats are read with the most lines first; once one is trusted, formats with fewer lines are not read, so a two-line print costs the same time as before (~0.3 s on the fixture crop). A single-line print first fails the two-line format(s), which takes longer (~1.5 s on the fixture crop).
+
+If the font reader can't be loaded, or supports none of the formats, the app still starts and logs an error. Every read is then NOK with `failure_reason: ocr_engine_error`.
 
 **Verification models**: `backend/detection/ocr/models/verification/font_reader_without_<bottle>.npz` were trained without that bottle (4113, 3030, 5203, 5307). Point `font_reader.model` at one and put that bottle under the camera to check that the reader reads rather than recalls. Set it back to `''` afterwards.
 
@@ -84,3 +79,11 @@ If the font reader can't be loaded, or doesn't support the template, the app sti
 | `response_nok` | `"NOK\n"` | Sent for every NOK, camera failure, start failure or timeout |
 | `timeout_s` | `15.0` | Wait this long for a result before answering NOK (`vision_timeout`) |
 | `max_text_length` | `64` | Longer OK reads are sent as NOK (`text_too_long`). Keep this at or below the PLC receive buffer. |
+
+## Frame source (`camera`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `camera.source` | `"live"` | `"live"` = the camera; `"images"` = still images from `images_dir`, stepped with the arrow keys on the HMI (each step runs a read) |
+| `camera.images_dir` | `"data/test_images"` | Folder with test images (png, jpg, bmp, tif), relative to the project root |
+| `camera.images_max_width` | `744` | Test images wider than this are scaled down to this width (aspect ratio kept, never upscaled) so characters match the production camera's size; `0` = keep the original size |

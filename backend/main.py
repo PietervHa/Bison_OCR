@@ -6,11 +6,16 @@ management, vision processing, the TCP trigger server for PLC integration,
 and the web interface.
 """
 
+import sys
 import threading
+import traceback
 import keyboard
 import uvicorn
+from pathlib import Path
+
 from backend.core.camera import Camera
-from backend.core.vision import run_vision, bind_app_state
+from backend.core.image_source import ImageFolderSource
+from backend.core.vision import run_vision, bind_app_state, capture_time_of
 from backend.core.tcp_trigger_server import TCPTriggerServer
 from frontend.web import create_app
 from backend.core.state import AppState
@@ -18,6 +23,7 @@ import time
 from backend.core.config_loader import cfg
 from backend.utils.logger import setup_logging, get_logger, UVICORN_LOG_CONFIG
 from backend.output.result_writer import save_result
+from backend.utils.priority import set_process_priority
 
 log = get_logger(__name__)
 _vision_busy = threading.Event()
@@ -62,15 +68,76 @@ def _process_vision_result(result, trigger_time, app_state):
                 detection_count,
             )
         else:
+            validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
             log.info(
-                "VISION RESULT: status=%s cycle_time_ms=%s confidence=%s detections=%s",
+                "VISION RESULT: status=%s cycle_time_ms=%s confidence=%s detections=%s format=%s",
                 status,
                 cycle_time_ms,
                 confidence,
                 detection_count,
+                validation.get("format"),
             )
     except Exception as exc:
         log.error("Failed to process vision result: %s", exc)
+
+def _start_stall_watchdog(cycle_done, trigger_time):
+    """Log the stack of every thread while a cycle is still running after
+    debug.stall_dump_ms, and again at each further multiple (max 3 dumps),
+    to show where a stalled cycle is stuck. 0 disables it."""
+    interval_s = float(cfg.get("debug", {}).get("stall_dump_ms", 2000)) / 1000.0
+    if interval_s <= 0:
+        return
+
+    def _watch():
+        for _ in range(3):
+            if cycle_done.wait(interval_s):
+                return
+            elapsed_ms = (time.perf_counter() - trigger_time) * 1000
+            names = {t.ident: t.name for t in threading.enumerate()}
+            parts = [f"STALL: cycle still running after {elapsed_ms:.0f} ms; thread stacks:"]
+            for ident, frame in sys._current_frames().items():
+                if ident == threading.get_ident():
+                    continue
+                parts.append(f"--- thread {names.get(ident, '?')} ({ident})")
+                parts.append("".join(traceback.format_stack(frame)).rstrip())
+            log.warning("\n".join(parts))
+
+    threading.Thread(target=_watch, name="stall-watchdog", daemon=True).start()
+
+
+def start_vision_cycle(camera, app_state) -> bool:
+    """Grab a frame and start one vision cycle in the background.
+    Returns False when a cycle is already running."""
+    if _vision_busy.is_set():
+        return False
+    frame = camera.get_frame()
+    captured = capture_time_of(camera)
+    if frame is None:
+        log.warning("No frame available; reporting NOK")
+
+    # Track trigger time for cycle time measurement
+    trigger_time = time.perf_counter()
+
+    cycle_done = threading.Event()
+    _start_stall_watchdog(cycle_done, trigger_time)
+
+    def _callback(result):
+        try:
+            _process_vision_result(result, trigger_time, app_state)
+        finally:
+            cycle_done.set()
+            _vision_busy.clear()
+
+    _vision_busy.set()
+    try:
+        run_vision(frame, callback=_callback, capture_time=captured)  # background thread, calls _callback
+    except Exception:
+        cycle_done.set()
+        _vision_busy.clear()
+        raise
+    log.debug("Vision processing started (non-blocking)")
+    return True
+
 
 def vision_trigger_loop(camera, app_state):
     """
@@ -79,38 +146,44 @@ def vision_trigger_loop(camera, app_state):
     Pressing 'q' triggers the camera to capture a frame and starts vision
     processing in a background thread.
     """
-    global _vision_busy
     log.info("Press Q to trigger vision. Ctrl+C to exit.")
 
     while True:
         try:
             keyboard.wait("q")
-
-            if _vision_busy.is_set():
-                continue
-
-            frame = camera.get_frame()
-            if frame is None:
-                log.warning("No frame available; reporting NOK")
-
-            # Track trigger time for cycle time measurement
-            trigger_time = time.perf_counter()
-
-            def _callback(result):
-                global _vision_busy
-                try:
-                    _process_vision_result(result, trigger_time, app_state)
-                finally:
-                    _vision_busy.clear()
-
-            _vision_busy.set()
-
-            # Trigger vision in background thread with callback
-            run_vision(frame, callback=_callback)
-            log.debug("Vision processing started (non-blocking)")
+            start_vision_cycle(camera, app_state)
         except Exception as exc:
-            _vision_busy.clear()
             log.error("Vision trigger loop error: %s", exc)
+
+
+def test_image_autoplay_loop(camera, app_state):
+    """Test-image mode: step to the next image every camera.images_autoplay_s
+    seconds and read it. A manual step (arrow keys) restarts the countdown,
+    space on the HMI pauses it, and while a read is still running the step
+    waits - so the image on screen and the result always belong together."""
+    while True:
+        time.sleep(0.05)
+        try:
+            if camera.autoplay_due() and not _vision_busy.is_set():
+                camera.step(+1)
+                start_vision_cycle(camera, app_state)
+        except Exception as exc:
+            log.error("Test-image autoplay error: %s", exc)
+
+
+def make_frame_source(app_state):
+    """The camera, or still images from a folder (camera.source: "images")."""
+    cam_cfg = cfg.get("camera", {}) or {}
+    if str(cam_cfg.get("source", "live")).lower() == "images":
+        folder = Path(cam_cfg.get("images_dir") or "data/test_images")
+        if not folder.is_absolute():
+            folder = Path(__file__).resolve().parents[1] / folder
+        log.info("Frame source: test images from %s (arrow keys on the HMI)", folder)
+        return ImageFolderSource(folder, app_state=app_state,
+                                 max_width=cam_cfg.get("images_max_width", 744),
+                                 autoplay_s=cam_cfg.get("images_autoplay_s", 0))
+    return Camera(0, app_state=app_state)
+
 
 def main():
     """
@@ -119,14 +192,17 @@ def main():
     Sets up logging, application state, camera, web server, and TCP trigger server.
     """
     setup_logging()
+    priority = (cfg.get("performance") or {}).get("process_priority", "normal")
+    if set_process_priority(priority):
+        log.info("Process priority: %s", priority)
     app_state = AppState()
     bind_app_state(app_state)
 
     try:
-        camera = Camera(0, app_state=app_state)
+        camera = make_frame_source(app_state)
 
         web_cfg = cfg["web"]
-        app = create_app(camera, app_state)
+        app = create_app(camera, app_state, start_cycle=lambda: start_vision_cycle(camera, app_state))
         web_thread = threading.Thread(
             target=lambda: uvicorn.run(
                 app,
@@ -137,6 +213,12 @@ def main():
             daemon=True,
         )
         web_thread.start()
+
+        if isinstance(camera, ImageFolderSource) and camera.autoplay_s > 0:
+            threading.Thread(target=test_image_autoplay_loop, args=(camera, app_state),
+                             name="test-image-autoplay", daemon=True).start()
+            log.info("Test images: auto-advance every %.1f s (arrow keys still step, space pauses)",
+                     camera.autoplay_s)
 
         display_host = "127.0.0.1" if web_cfg["host"] in ("0.0.0.0", "127.0.0.1", "localhost") else web_cfg["host"]
         log.info("Web dashboard: http://%s:%s", display_host, web_cfg["port"])

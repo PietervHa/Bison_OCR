@@ -2,8 +2,8 @@
 Configuration Loader
 
 This module loads the application's configuration from a YAML file
-(config/default.yaml, or --config <path>) and loads the project root .env
-file into the environment (MAINTENANCE_PASSWORD). It provides a global
+(config/default.yaml, or --config <path>) and loads an optional project root .env
+file into the environment. It provides a global
 `cfg` dictionary used throughout the project.
 """
 

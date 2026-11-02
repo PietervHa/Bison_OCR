@@ -536,3 +536,14 @@ body {
 @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; }
 }
+
+/* Test-image mode (camera.source: "images") */
+.test-image-info {
+    margin-top: 6px;
+    padding: 4px 10px;
+    font-size: 14px;
+    color: #fff;
+    background: #1f4e79;
+    border-radius: 4px;
+    text-align: center;
+}

@@ -5,11 +5,11 @@
 ```
             ┌──────────────── Web HMI (FastAPI + HTML/JS, port 5000) ───────────────┐
             │  /  /status  /result  /video_feed  /camera_status                     │
-            │  /maintenance_mode  /camera_rotation  /reset_counters                 │
+            │  /camera_rotation  /reset_counters                                    │
             └───────────────────────────────┬───────────────────────────────────────┘
                                             │
                               AppState (lock-protected)
-                     last result · counters · maintenance session · rotation
+                     last result · counters · rotation                      
                                             │
      ┌──────────────────┬───────────────────┼─────────────────────┐
      ▼                  ▼                   ▼                     ▼
@@ -41,14 +41,15 @@
 2. **Frame**: the latest frame from the camera. If there is no frame, the TCP server records `camera_unavailable` and answers `NOK`.
 3. **Locate** (`text_locator.locate_text_region`): blackhat ink map, long rib lines erased, components clustered into the text block. Returns a rotated rect, or `None` (then the full frame is read).
 4. **Crop** (`text_locator.deskew_crop`): straightened crop with 20 px extra margin. Then `ocr.downscale`/`min_dim` (no-op for today's crop size).
-5. **Font reader** (`font_reader.FontReader.read`): `dot_text.clean_dot_text` cleanup, grid segmentation, classifier per character cell, both orientations tried. Returns lines, text, `literal_score` and the lowest digit confidence, or `None`.
-6. **Validate**:
+5. **Font reader** (`font_reader.FontReader.read`): `dot_text.clean_dot_text` cleanup, grid segmentation, classifier per character cell, both orientations tried. Returns lines, text, `literal_score` and the lowest digit confidence, or `None`. This runs once per configured format the model supports (`ocr.read_validation.templates`); a one-line format on a crop that holds two lines gives `None`.
+6. **Choose the format**: of the trusted reads, the format with more lines wins, then the higher `literal_score`. Without a trusted read, the read with the highest `literal_score` gives the reject reason.
+7. **Validate**:
    - Reject if `literal_score < min_literal_score` (`format_mismatch`).
    - Reject if digit confidence `< min_digit_confidence` (`low_confidence`).
    - Otherwise the template check (`CodeTemplate.validate`: format and `value_pattern`) decides.
-7. **Result**: built by the engine and normalised in `vision._normalize_result`. A rejected read always has `text == ""` and `detections == []`.
-8. **Record**: `main._process_vision_result` adds `cycle_time_ms`, updates AppState and counters, and appends to the JSONL file.
-9. **Answer**: the TCP server sends the code text plus `\n` on OK, otherwise `NOK\n`.
+8. **Result**: built by the engine and normalised in `vision._normalize_result`. A rejected read always has `text == ""` and `detections == []`.
+9. **Record**: `main._process_vision_result` adds `cycle_time_ms`, updates AppState and counters, and appends to the JSONL file.
+10. **Answer**: the TCP server sends the code text plus `\n` on OK, otherwise `NOK\n`.
 
 With `ocr.dynamic_roi.debug_save: true`, each read writes a folder `data/debug/dynamic_roi/<timestamp>/` containing:
 
@@ -66,10 +67,14 @@ With `ocr.dynamic_roi.debug_save: true`, each read writes a folder `data/debug/d
   "detections": [{"text": "4113 08:26", "confidence": 0.99}, {"text": "BB 05/26", "confidence": 0.99}],
   "confidence": 0.99,
   "validation": {"accepted": true, "reason": null, "fusion": null,
+                 "format": ["#### ##:##", "BB ##/##"],
                  "reads": [{"variant": "font_reader", "accepted": true, "reason": null,
                             "text": "4113 08:26 BB 05/26", "raw_text": "4113 08:26 BB 05/26",
                             "min_token_confidence": 0.99, "literal_score": -0.2,
-                            "timings_ms": {}, "orientation": "normal"}]},
+                            "timings_ms": {}, "orientation": "normal",
+                            "format": ["#### ##:##", "BB ##/##"],
+                            "formats_tried": [{"format": ["#### ##:##", "BB ##/##"], "trusted": true,
+                                               "literal_score": -0.2, "min_token_confidence": 0.99}, "..."]}]},
   "processing_time_ms": 412.3,
   "cycle_time_ms": 420.1,
   "timestamp": "2026-10-13T09:43:03.123456"
@@ -101,12 +106,6 @@ A NOK result has `"status": "NOK"` and a `failure_reason`. A technical failure a
 | `vision_start_failed` | TCP trigger, but the read could not be started |
 | `vision_timeout` | TCP trigger, no result within `trigger.timeout_s` |
 
-## Maintenance mode
+## Camera rotation and counter reset
 
-`POST /maintenance_mode` with `{"maintenance_mode": true, "password": "..."}`:
-
-- `MAINTENANCE_PASSWORD` (from `.env` or the environment) not set or empty: 403, maintenance stays locked.
-- Wrong password: 403 after about 1 s. The comparison uses `secrets.compare_digest`.
-- Right password: maintenance on, and an httponly session cookie `maintenance_session` (30 min). `/camera_rotation` and `/reset_counters` require that cookie.
-
-`{"maintenance_mode": false}` leaves maintenance mode and clears the session.
+`POST /camera_rotation` and `POST /reset_counters` need no login. The HMI asks for confirmation before resetting the counters.

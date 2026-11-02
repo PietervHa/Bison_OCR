@@ -25,8 +25,6 @@ class AppState:
             "nok": 0,
             "total": 0,
         }
-        self.maintenance_mode = False
-        self.maintenance_session_token = ""
         self.camera_rotation = 0  # steps: 0, 1, 2, 3 (each = 90° clockwise)
 
     def update_result(self, result: dict):
@@ -66,36 +64,11 @@ class AppState:
             return {
                 "result": dict(self.latest_result),
                 "counters": dict(self.counters),
-                "maintenance_mode": self.maintenance_mode,
             }
 
-    def get_maintenance_mode(self) -> bool:
-        """
-        Checks if the application is in maintenance mode.
-        """
-        with self.lock:
-            return self.maintenance_mode
 
-    def set_maintenance_mode(self, value: bool):
-        """
-        Enables or disables maintenance mode.
-        """
-        with self.lock:
-            self.maintenance_mode = bool(value)
 
-    def get_maintenance_session_token(self) -> str:
-        """
-        Gets the session token that authorizes maintenance mode in the browser.
-        """
-        with self.lock:
-            return self.maintenance_session_token
 
-    def set_maintenance_session_token(self, value: str):
-        """
-        Stores or clears the maintenance session token.
-        """
-        with self.lock:
-            self.maintenance_session_token = str(value or "")
 
     def get_camera_rotation(self) -> int:
         """

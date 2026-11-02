@@ -233,7 +233,11 @@ class TCPTriggerServer:
             done_event.set()
 
         try:
-            self.run_vision_fn(frame, callback=callback)
+            # The frame's capture time for OCRead's time plausibility check,
+            # when the source has one (vision.capture_time_of).
+            captured = getattr(self.camera, "frame_capture_time", lambda: None)()
+            kwargs = {"capture_time": captured} if captured is not None else {}
+            self.run_vision_fn(frame, callback=callback, **kwargs)
         except Exception as exc:
             logger.error(
                 "Failed to start vision processing for TCP trigger: %s",

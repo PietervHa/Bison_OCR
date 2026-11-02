@@ -39,10 +39,16 @@ Matching rules - chosen so validation can reject, but never invent:
   - Every token used must have confidence >= min_confidence.
   - Optionally the canonical text must fully match value_pattern (e.g. a
     regex that also checks hours 00-23 and months 01-12).
+  - Optionally (max_expiry_years) the year of an expiry date - the "MM/YY"
+    after BB or EXP - must lie between this year and this year +
+    max_expiry_years (system date). "BB 05/38" read for 05/28 fits the
+    pattern and was read at digit confidence 0.999; only the date can
+    reject it. PROD (a production date) and line 1 are not checked.
 """
 
 from __future__ import annotations
 
+import datetime
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -68,6 +74,50 @@ REJECT_NO_TEXT = "no_text_detected"
 REJECT_FORMAT = "format_mismatch"
 REJECT_CONFIDENCE = "low_confidence"
 REJECT_VALUE = "invalid_value"
+REJECT_TIMEOUT = "timeout"
+# The read was accepted with a digit confidence in the grey zone and slightly
+# moved crops did not all give the same code (OCRead agreement check).
+REJECT_UNSTABLE = "unstable_read"
+# Line 1 (year digit + day of year, HH:MM) is not the print time of a bottle
+# captured at this moment (plausible_line1).
+REJECT_IMPLAUSIBLE = "implausible_time"
+# Line 1 of every format: year digit, day of year, HH:MM.
+LINE1 = re.compile(r"^(\d)(\d{3}) (\d{2}):(\d{2})$")
+
+
+def line1_offset_min(line1: str, capture: datetime.datetime):
+    """Minutes from the capture minute (capture time, seconds dropped) to
+    the print time line 1 stands for - e.g. +1 for "6274 06:33" captured at
+    06:32:50 on 1-10-2026. The year is the one nearest the capture year with
+    that last digit; the day and time run on across midnight, so "6274
+    23:59" captured at 00:00:30 on 2-10-2026 is -1. None when line 1 is not
+    a date and time: not the LINE1 pattern, day 0 or past the year's end,
+    hour > 23, minute > 59, or no year with that digit within a year."""
+    m = LINE1.match(line1 or "")
+    if not m:
+        return None
+    digit, doy, hh, mm = (int(g) for g in m.groups())
+    years = [y for y in (capture.year - 1, capture.year, capture.year + 1) if y % 10 == digit]
+    if not years or hh > 23 or mm > 59:
+        return None
+    year = years[0]
+    days = (datetime.date(year + 1, 1, 1) - datetime.date(year, 1, 1)).days
+    if not 1 <= doy <= days:
+        return None
+    printed = datetime.datetime(year, 1, 1) + datetime.timedelta(days=doy - 1, hours=hh, minutes=mm)
+    return int((printed - capture.replace(second=0, microsecond=0)).total_seconds() // 60)
+
+
+def plausible_line1(line1: str, capture: datetime.datetime, before_min: int, after_min: int) -> bool:
+    """Line 1 is a print time from before_min minutes before the capture
+    minute up to after_min minutes after it (the printer's and the vision
+    PC's clocks are in sync - NTP - but printing, transport and the minute
+    boundary leave a minute or two). Not a date and time: implausible."""
+    off = line1_offset_min(line1, capture)
+    return off is not None and -before_min <= off <= after_min
+
+# "BB 05/28", "EXP 05/28" in a canonical code: group 1 is the year YY.
+EXPIRY_DATE = re.compile(r"(?:^| )(?:BB|EXP) (?:\d{2})/(\d{2})(?= |$)")
 
 
 def normalize_token(text: str) -> str:
@@ -88,7 +138,7 @@ class _Match:
 
 class CodeTemplate:
     def __init__(self, lines, value_pattern=None, min_confidence=0.0,
-                 max_corrections=1, max_ignored_tokens=2):
+                 max_corrections=1, max_ignored_tokens=2, max_expiry_years=0, today=None):
         if isinstance(lines, str):
             lines = [lines]
         self.lines = [str(line) for line in lines if str(line).strip()]
@@ -104,6 +154,10 @@ class CodeTemplate:
         self.min_confidence = float(min_confidence)
         self.max_corrections = int(max_corrections)
         self.max_ignored_tokens = int(max_ignored_tokens)
+        # 0 = no expiry year check. today: a callable giving the date to
+        # check against (tests); None = the system date.
+        self.max_expiry_years = int(max_expiry_years or 0)
+        self.today = today or datetime.date.today
 
     @classmethod
     def from_config(cls, cfg: dict):
@@ -113,7 +167,19 @@ class CodeTemplate:
             min_confidence=cfg.get("min_confidence", 0.0),
             max_corrections=cfg.get("max_corrections", 1),
             max_ignored_tokens=cfg.get("max_ignored_tokens", 2),
+            max_expiry_years=cfg.get("max_expiry_years", 5),
         )
+
+    @classmethod
+    def list_from_config(cls, cfg: dict):
+        """One CodeTemplate per configured print format: `templates` (a list
+        of formats, each a list of lines), or the older single `template` when
+        `templates` is absent. value_pattern and the matching settings are
+        shared by all formats."""
+        templates = cfg.get("templates")
+        if not templates:
+            templates = [cfg.get("template") or []]
+        return [cls.from_config(dict(cfg, template=t)) for t in templates]
 
     # -- character level ---------------------------------------------------
 
@@ -231,6 +297,15 @@ class CodeTemplate:
             out.append(m[0]); corr += m[1]; lit += m[2]
         return "".join(out), corr, lit
 
+    def _expiry_year_ok(self, canonical) -> bool:
+        """Every expiry year YY in the code within this year .. this year +
+        max_expiry_years (two-digit years, so 99 -> 00 wraps)."""
+        if self.max_expiry_years <= 0:
+            return True
+        this_year = self.today().year % 100
+        return all((int(yy) - this_year) % 100 <= self.max_expiry_years
+                   for yy in EXPIRY_DATE.findall(canonical))
+
     def validate(self, candidates) -> dict:
         tokens = [(normalize_token(c.get("text", "")), float(c.get("confidence", 0.0)))
                   for c in candidates or []]
@@ -257,5 +332,7 @@ class CodeTemplate:
         if min(best.used_confidences) < self.min_confidence:
             return dict(info, reason=REJECT_CONFIDENCE)
         if self.value_pattern and not self.value_pattern.fullmatch(canonical):
+            return dict(info, reason=REJECT_VALUE)
+        if not self._expiry_year_ok(canonical):
             return dict(info, reason=REJECT_VALUE)
         return dict(info, accepted=True, reason=None)

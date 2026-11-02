@@ -63,6 +63,14 @@ DEFAULTS = {
     "line_min_length_px": 65,
     # Number of directions checked for long lines (180 / 36 = every 5 deg).
     "line_angles": 36,
+    # Speed: find the long lines on the ink map scaled by this factor (max-
+    # pooled, so a 1 px rib edge keeps its darkness; line_min_length_px
+    # scaled along) and scale them back up, never above the ink itself.
+    # The openings are ~85% of this function's time. 1.0 = full resolution.
+    "line_scale": 1.0,
+    # Speed: run the line openings on this many threads (backend/utils/
+    # workers.py; OpenCV releases the GIL). The same result; 1 = serial.
+    "threads": 1,
     # Window for local contrast normalisation, ~1 character height.
     "local_window_px": 21,
     # A region's reference contrast is never taken below this fraction of
@@ -141,9 +149,25 @@ def clean_dot_text(crop: np.ndarray, cfg: dict | None = None, debug: dict | None
     # long in that direction. Print is far shorter, so it isn't in here.
     lines = np.zeros_like(ink)
     length = int(p["line_min_length_px"])
+    scale_l = float(p["line_scale"] or 1.0)
     if length >= 3 and int(p["line_angles"]) > 0:
-        for lk in _line_kernels(length, int(p["line_angles"])):
-            np.maximum(lines, cv2.morphologyEx(ink, cv2.MORPH_OPEN, lk), out=lines)
+        if scale_l < 1.0:
+            step = max(1, int(round(1.0 / scale_l)))
+            small = cv2.dilate(ink, np.ones((step, step), np.uint8))[::step, ::step]
+            small_lines = np.zeros_like(small)
+            for lk in _line_kernels(max(3, int(round(length / step))), int(p["line_angles"])):
+                np.maximum(small_lines, cv2.morphologyEx(small, cv2.MORPH_OPEN, lk), out=small_lines)
+            lines = np.minimum(cv2.resize(small_lines, (ink.shape[1], ink.shape[0]), interpolation=cv2.INTER_LINEAR),
+                               ink)
+        elif int(p["threads"] or 1) > 1:
+            from backend.utils.workers import pool
+            opened = pool(int(p["threads"])).map(lambda lk: cv2.morphologyEx(ink, cv2.MORPH_OPEN, lk),
+                                                 _line_kernels(length, int(p["line_angles"])))
+            for o in opened:
+                np.maximum(lines, o, out=lines)
+        else:
+            for lk in _line_kernels(length, int(p["line_angles"])):
+                np.maximum(lines, cv2.morphologyEx(ink, cv2.MORPH_OPEN, lk), out=lines)
 
     if str(p["illumination"]).lower() == "subtract":
         text_ink = np.clip(ink - lines, 0, None)
