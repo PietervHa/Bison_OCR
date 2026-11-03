@@ -101,7 +101,7 @@ ocr:
     # The printer's and this PC's clocks MUST be in sync (NTP on both):
     # a clock off by more than the window makes every read NOK.
     # false = off.
-    time_check: true
+    time_check: false
     time_window_before: 2
     time_window_after: 1
     font_reader:
