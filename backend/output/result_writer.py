@@ -24,12 +24,43 @@ if not _output_dir.is_absolute():
     _output_dir = Path(__file__).resolve().parents[2] / _output_dir
 
 
+_keep_days = int(cfg.get("output", {}).get("result_keep_days", 90) or 0)
+_last_cleanup = None
+
+
+def cleanup_old_results(keep_days=None, today=None):
+    """Delete daily result files (<date>.jsonl) older than keep_days
+    (output.result_keep_days; 0 = keep everything). Returns the number deleted."""
+    keep = _keep_days if keep_days is None else int(keep_days)
+    if keep <= 0 or not _output_dir.is_dir():
+        return 0
+    today = today or datetime.now().date()
+    deleted = 0
+    for f in _output_dir.glob("*.jsonl"):
+        try:
+            day = datetime.strptime(f.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue                                   # not a daily results file
+        if (today - day).days > keep:
+            try:
+                f.unlink(); deleted += 1
+            except OSError:
+                log.warning("Could not delete old results file %s", f)
+    if deleted:
+        log.info("Deleted %d results file(s) older than %d days", deleted, keep)
+    return deleted
+
+
 def save_result(result: dict):
     """
     Appends a vision processing result to the daily JSONL file.
     """
+    global _last_cleanup
     now = datetime.now()
     result["timestamp"] = now.isoformat()
+    if _last_cleanup != now.date():                    # once per day, also right after startup
+        _last_cleanup = now.date()
+        cleanup_old_results()
 
     with _write_lock:
         try:
