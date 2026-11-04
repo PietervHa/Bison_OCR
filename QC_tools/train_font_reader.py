@@ -175,6 +175,46 @@ def label_lines(template, line1, date, t):
     return out
 
 
+def folder_label(name, formats):
+    """Code from a folder name for --labels-from-folders, or None.
+    Windows doesn't allow ':' and '/' in names, so they are written as '-':
+    "6303 10-49 BB 05-28" -> (["#### ##:##", "BB ##/##"], ["6303 10:49", "BB 05/28"]).
+    The name must match one of the configured formats exactly."""
+    name = " ".join(name.split())
+    for tpl in formats:
+        want = " ".join(tpl)
+        if len(name) != len(want):
+            continue
+        ok = True
+        for c, w in zip(name, want):
+            if w == "#":
+                ok = c.isdigit()
+            elif w in ":/":
+                ok = c in (w, "-")
+            else:
+                ok = c.upper() == w.upper()
+            if not ok:
+                break
+        if ok:
+            code = "".join(c if w == "#" else w for c, w in zip(name, want))
+            lines, i = [], 0
+            for tl in tpl:
+                lines.append(code[i:i + len(tl)]); i += len(tl) + 1
+            return list(tpl), lines
+    return None
+
+
+def time_from_line1(line1, today=None):
+    """Print time implied by line 1 ("6303 10:49" -> 30-10-2026 10:49): the most
+    recent year ending in the year digit (not in the future), day of year, HH:MM."""
+    today = today or datetime.date.today()
+    d, doy, hhmm = int(line1[0]), int(line1[1:4]), line1.split()[1]
+    year = today.year - ((today.year - d) % 10)
+    day = datetime.date(year, 1, 1) + datetime.timedelta(days=doy - 1)
+    h, m = map(int, hhmm.split(":"))
+    return datetime.datetime(day.year, day.month, day.day, h, m)
+
+
 def format_name(template):
     """Short name for reports: "BB", "EXP", ... (first field of line 2) or "single_line"."""
     return template[1].split()[0] if len(template) > 1 else "single_line"
@@ -386,11 +426,13 @@ def _init_worker(scorer_path, max_width):
 
 def _label_image(job):
     """(path, crop, best_layout() result) for one image; crop None = unreadable."""
-    p, t, date, min_fit = job
+    p, t, date, min_fit, fixed = job
     img = cv2.imread(str(p))
     if img is None:
         return p, None, None
     crop = crop_of(_WORKER["engine"], img, _WORKER["max_width"])
+    if fixed:   # --labels-from-folders: one exact code and format per folder
+        return p, crop, best_layout(_WORKER["scorer"], crop, t, [(0, fixed["line1"])], date, [fixed["template"]], min_fit)
     return p, crop, best_layout(_WORKER["scorer"], crop, t, line1_candidates(t), date, _WORKER["formats"], min_fit)
 
 
@@ -439,6 +481,9 @@ def main(argv=None):
     ap.add_argument("--date", default="05/28",
                     help="date on line 2 of BB and EXP, e.g. 05/28 (PROD: month/year of the capture date)")
     ap.add_argument("--max-width", type=int, default=744)
+    ap.add_argument("--labels-from-folders", action="store_true",
+                    help="take the code from each image's folder name, e.g. '6303 10-49 BB 05-28' "
+                         "(':' and '/' written as '-'), instead of from the file name's timestamp")
     ap.add_argument("--min-fit", type=float, default=-4.0, help="leave out only clear failures (old model fit below this)")
     ap.add_argument("--synth", type=int, default=1500, help="synthetic codes to add (0 = none)")
     ap.add_argument("--scorer", type=Path, default=DEFAULT_MODEL,
@@ -473,17 +518,43 @@ def main(argv=None):
     files = sorted((p for p in args.images.rglob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")),
                    key=lambda p: capture_time(p) or datetime.datetime.min)
     per_day = defaultdict(list)
-    for p in files:
-        t = capture_time(p)
-        if t:
-            per_day[t.date()].append((p, t))
+    fixed = {}
+    if args.labels_from_folders:
+        from backend.core.config_loader import cfg as _cfg
+        rv = (_cfg.get("ocr", {}) or {}).get("read_validation", {}) or {}
+        formats = rv.get("templates") or [rv.get("template")]
+        not_a_code = Counter()
+        for p in files:
+            lab = folder_label(p.parent.name, formats)
+            if lab is None:                               # not a code folder: timestamp label, if any
+                t = capture_time(p)
+                if t:
+                    per_day[t.date()].append((p, t))
+                else:
+                    not_a_code[p.parent.name] += 1
+                continue
+            tpl, lines = lab
+            t = time_from_line1(lines[0])
+            date = "/".join(lines[1].split()[-1].split("/")) if len(lines) > 1 else args.date
+            fixed[p] = {"line1": lines[0], "template": tpl, "date": date}
+            per_day[p.parent.name].append((p, t))     # split train/test per bottle folder
+        if not_a_code:
+            print("Skipped - neither a code folder nor a timestamp file name:", dict(not_a_code))
+        if not per_day:
+            raise SystemExit(f"No labelled folders found under {args.images}")
+    else:
+        for p in files:
+            t = capture_time(p)
+            if t:
+                per_day[t.date()].append((p, t))
     split = {}
     for day, items in per_day.items():
         for i, (p, t) in enumerate(items):
             split[p] = "train" if i % 2 == 0 else "test"
 
     t0 = time.time(); samples = []; skipped = Counter(); no_fit = []; line1_chosen = Counter(); rejected = []
-    jobs = [(p, t, args.date, args.min_fit) for items in per_day.values() for p, t in items]
+    jobs = [(p, t, fixed[p]["date"] if p in fixed else args.date, args.min_fit, fixed.get(p))
+            for items in per_day.values() for p, t in items]
     init = (str(args.scorer), args.max_width)
     if args.workers > 1:
         pool = multiprocessing.Pool(args.workers, initializer=_init_worker, initargs=init)
@@ -503,7 +574,8 @@ def main(argv=None):
         tpl, l1, delta = fit["template"], fit["line1"], fit["delta"]
         line1_chosen[f"{delta:+d} min" if delta else "same minute"] += 1
         samples.append({"path": p, "split": split[p], "template": tpl, "labels": fit["labels"], "cells": fit["cells"],
-                        "text": " ".join(label_lines(tpl, l1, args.date, capture_time(p))),   # e.g. "6274 09:23 BB 05/28"
+                        "text": " ".join(label_lines(tpl, l1, fixed[p]["date"] if p in fixed else args.date,
+                                                    time_from_line1(l1) if p in fixed else capture_time(p))),   # e.g. "6274 09:23 BB 05/28"
                         "crop": crop, "fit": fit["score"]})
     if pool:
         pool.close(); pool.join()
