@@ -214,7 +214,10 @@ def main():
         )
         web_thread.start()
 
-        if isinstance(camera, ImageFolderSource) and camera.autoplay_s > 0:
+        step_on_trigger = bool((cfg.get("camera") or {}).get("images_step_on_trigger", False))
+        if isinstance(camera, ImageFolderSource) and camera.autoplay_s > 0 and step_on_trigger:
+            log.info("Test images: auto-advance off - images_step_on_trigger is on (the trigger steps)")
+        elif isinstance(camera, ImageFolderSource) and camera.autoplay_s > 0:
             threading.Thread(target=test_image_autoplay_loop, args=(camera, app_state),
                              name="test-image-autoplay", daemon=True).start()
             log.info("Test images: auto-advance every %.1f s (arrow keys still step, space pauses)",
@@ -227,8 +230,11 @@ def main():
             camera=camera,
             run_vision_fn=run_vision,
             process_result_fn=lambda result, t: _process_vision_result(result, t, app_state),
+            step_images_on_trigger=bool((cfg.get("camera") or {}).get("images_step_on_trigger", False)),
         )
         trigger_server.start()
+        if trigger_server.step_images_on_trigger:
+            log.info("Test images: every PLC/TCP trigger moves to the next image (like the next bottle)")
 
         vision_trigger_loop(camera, app_state)
     except Exception as exc:

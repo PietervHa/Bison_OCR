@@ -101,7 +101,7 @@ ocr:
     # The printer's and this PC's clocks MUST be in sync (NTP on both):
     # a clock off by more than the window makes every read NOK.
     # false = off.
-    time_check: true
+    time_check: false
     time_window_before: 2
     time_window_after: 1
     font_reader:
@@ -371,6 +371,9 @@ camera:
   # (0 = off). Arrow keys still step (and restart the countdown), space on
   # the HMI pauses/resumes. A step waits while a read is still running.
   images_autoplay_s: 1.0
+  # PLC test with test images: every TCP/PLC trigger first moves to the next
+  # image, like the next bottle arriving. Turns auto-advance off.
+  images_step_on_trigger: false
   device_name: "DFK 22BUC03" # <--- Change this to your camera's device name, Thanks to Peter for the tip'
   index: 0
   # NOTE: the DFK 22BUC03 is a 744x480 sensor - it cannot deliver the
@@ -464,6 +467,7 @@ web:
 # Output settings
 output:
   result_dir: "data/results"
+  result_keep_days: 30      # delete daily results files older than this (0 = keep all)
 
 # TCP trigger settings (PLC)
 trigger:

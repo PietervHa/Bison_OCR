@@ -23,10 +23,13 @@ class TCPTriggerServer:
     When a trigger byte is received, it captures a frame, runs vision 
     processing, and returns an OK/NOK response.
     """
-    def __init__(self, camera, run_vision_fn, process_result_fn):
+    def __init__(self, camera, run_vision_fn, process_result_fn, step_images_on_trigger=False):
         self.camera = camera
         self.run_vision_fn = run_vision_fn
         self.process_result_fn = process_result_fn
+        # Test-image mode (camera.images_step_on_trigger): every trigger moves
+        # to the next image first, like the next bottle arriving on the line.
+        self.step_images_on_trigger = bool(step_images_on_trigger) and hasattr(camera, "step")
 
         trig_cfg = cfg.get("trigger", {})
         self.host = trig_cfg.get("host", "0.0.0.0")
@@ -199,6 +202,8 @@ class TCPTriggerServer:
         separately as a camera-unavailable failure rather than being passed into
         the vision pipeline.
         """
+        if self.step_images_on_trigger:
+            self.camera.step(+1)
         frame = self.camera.get_frame()
         trigger_time = time.perf_counter()
 
