@@ -152,7 +152,7 @@ ocr:
     # year and this year + max_expiry_years (system date), else NOK
     # invalid_value: "BB 05/38" read for 05/28 fits value_pattern and was
     # read at digit confidence 0.999. PROD dates are not checked. 0 = off.
-    max_expiry_years: 5
+    max_expiry_years: 0
     # Template matching settings (code_validator.py). The font reader's
     # lines are checked at confidence 1.0, so min_confidence never rejects
     # them; its own gates are min_literal_score / min_digit_confidence above.
@@ -353,7 +353,7 @@ ocr:
     # detected bbox overlay, etc.) to debug_dir on every read - useful for
     # tuning the thresholds above against real bottles, but leave off in
     # normal production since it writes a file per cycle.
-    debug_save: true
+    debug_save: false
     debug_dir: "data/debug/dynamic_roi"
 
 # Camera settings
