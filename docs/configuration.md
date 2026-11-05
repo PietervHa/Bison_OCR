@@ -17,7 +17,7 @@ A profile sets how one kind of product is read. Its `ocr:` section is merged ove
 | Profile | For | What differs |
 |---|---|---|
 | `standard` | white, grey, silver and small bottles | nothing – the config file as it is (shared model `font_reader.npz`) |
-| `blue` | the blue HD-PE bottle | `ink_channel` = blue channel, `blackhat_threshold: 10`, `locate_blur_sigma: 0.4`, `ink_retry: false`, model `font_reader_blue.npz` (trained on site, not shipped – see `blue.yaml`) |
+| `blue` | the blue HD-PE bottle | `ink_channel` = blue channel, `blackhat_threshold: 10`, `locate_blur_sigma: 0.4`, `ink_retry: false`, `deskew_whole_rect: true`, model `font_reader_blue.npz` (trained on site, not shipped – see `blue.yaml`) |
 
 A new product: copy `blue.yaml`, change what differs, check it with `python -m QC_tools.evaluate_images <shots> --profile <name> --labels-from-folders` and, for its own model, train with `--profile <name>` (see `docs/development.md`).
 
@@ -69,6 +69,7 @@ If the font reader can't be loaded, or supports none of the formats, the app sti
 | `min_cluster_components`, `cluster_max_gap_px` | `4`, `30` | Text-block clustering |
 | `line_extend_max_perp_px`, `line_extend_max_gap_px` | `18`, `90` | Extend the block along its own line |
 | `padding_px` | `25` | Margin around the located block |
+| `deskew_whole_rect` | not set (`false`) | The deskewed crop holds the whole located rect also when the print lies along the frame edge at a large angle. Off: the margin around the rect is clamped to the frame before rotating, which cut the first dot column off a print along the right edge turned 88° (blue bottle: "6303" read as "5303"). Not one of the 34 white/silver debug frames was affected |
 | `locate_blur_sigma` | not set (`0`) | Smooth the image before the blackhat, for locating only (a grainy surface or a noisy ink channel); the crop is cut from the unsmoothed image |
 | `debug_save` | `false` | Write per-read debug images and `font_reader.txt` |
 | `debug_dir` | `data/debug/dynamic_roi` | Where they go (relative to the project root) |

@@ -84,6 +84,8 @@ class ProfileFilesTests(unittest.TestCase):
         # Same formats and checks as the config file; only the reading differs.
         for key in ("templates", "value_pattern", "agreement_band", "max_expiry_years", "time_check"):
             self.assertEqual(c["ocr"]["read_validation"].get(key), cfg["ocr"]["read_validation"].get(key), key)
+        self.assertTrue(c["ocr"]["dynamic_roi"]["deskew_whole_rect"])
+        self.assertFalse(cfg["ocr"]["dynamic_roi"].get("deskew_whole_rect", False))
         fr, base_fr = c["ocr"]["read_validation"]["font_reader"], cfg["ocr"]["read_validation"]["font_reader"]
         self.assertEqual(fr["min_digit_confidence"], base_fr["min_digit_confidence"])
         for key in ("camera", "trigger", "web", "output"):
@@ -121,6 +123,35 @@ class InkChannelTests(unittest.TestCase):
         gray = np.zeros((8, 8), np.uint8)
         self.assertIs(_locate_blur(gray, {}), gray)
         self.assertIs(_locate_blur(gray, {"locate_blur_sigma": 0}), gray)
+
+
+class DeskewWholeRectTests(unittest.TestCase):
+    """deskew_crop(whole_rect=True), the blue profile's deskew_whole_rect: a
+    print along the frame edge turned ~90 degrees lost the part of the crop
+    that rotates onto the frame-clamped side (eval_blue: "6303" read as
+    "5303" with the 6's left dot column cut off)."""
+
+    def _frame(self, cx):
+        frame = np.full((480, 744, 3), 200, np.uint8)
+        print_box = cv2.boxPoints(((cx, 240.0), (360.0, 40.0), -88.0)).astype(np.int32)
+        cv2.fillPoly(frame, [print_box], (40, 40, 40))
+        return frame, {"center": [cx, 240.0], "size": [400.0, 60.0], "angle": -88.0}
+
+    @staticmethod
+    def _dark(img):
+        return int((cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) < 120).sum())
+
+    def test_print_along_the_frame_edge_is_kept_whole(self):
+        from backend.detection.ocr.text_locator import deskew_crop
+        frame, rect = self._frame(700.0)
+        ink = self._dark(frame)
+        self.assertLess(self._dark(deskew_crop(frame, rect, 20)), 0.9 * ink)          # the old crop cuts it
+        self.assertGreater(self._dark(deskew_crop(frame, rect, 20, whole_rect=True)), 0.97 * ink)
+
+    def test_inside_the_frame_the_crop_is_unchanged(self):
+        from backend.detection.ocr.text_locator import deskew_crop
+        frame, rect = self._frame(372.0)
+        self.assertTrue(np.array_equal(deskew_crop(frame, rect, 20), deskew_crop(frame, rect, 20, whole_rect=True)))
 
 
 def _strip(r):

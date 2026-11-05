@@ -159,6 +159,9 @@ class OCRead:
         self._last_located = None
         # Second attempt at the print's row angle for a read that failed
         # (see read()); accepted only past these stricter gates.
+        # Deskewed crops hold the whole rect also near the frame edge
+        # (text_locator.deskew_crop, whole_rect). Off = the crop as before.
+        self.deskew_whole_rect = bool(dynamic_roi_cfg.get("deskew_whole_rect", False))
         self.row_angle_retry = bool(dynamic_roi_cfg.get("row_angle_retry", False))
         self.row_angle_retry_min_diff_deg = float(dynamic_roi_cfg.get("row_angle_retry_min_diff_deg", 3.0))
         self.row_angle_retry_min_confidence = float(dynamic_roi_cfg.get("row_angle_retry_min_digit_confidence", 0.9))
@@ -376,7 +379,8 @@ class OCRead:
         # Extra margin here, beyond dynamic_roi.padding_px (which is already
         # baked into rotated_rect). Changing it changes the crop the font
         # reader sees, so re-check reads on real frames before touching it.
-        crop = deskew_crop(frame, rotated_rect, extra_padding_px=20) if rotated_rect else None
+        crop = (deskew_crop(frame, rotated_rect, extra_padding_px=20, whole_rect=self.deskew_whole_rect)
+                if rotated_rect else None)
         if crop is None:
             # Degenerate rotated rect (shouldn't normally happen) - use
             # the axis-aligned box we already computed rather than the
@@ -481,7 +485,7 @@ class OCRead:
         first = located.get("rotated_rect") if located else None
 
         def prepared(rect):
-            crop = deskew_crop(frame, rect, extra_padding_px=20)
+            crop = deskew_crop(frame, rect, extra_padding_px=20, whole_rect=self.deskew_whole_rect)
             return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline, self.print_ink_ratio,
                                                           self.speed)
 
@@ -569,7 +573,7 @@ class OCRead:
                 if box is not None:
                     moved = dict(box, center=[box["center"][0] + dx, box["center"][1] + dy], angle=box["angle"] + da,
                                  size=[box["size"][0] * scale, box["size"][1] * scale])
-                    c = deskew_crop(frame, moved, extra_padding_px=20)
+                    c = deskew_crop(frame, moved, extra_padding_px=20, whole_rect=self.deskew_whole_rect)
                     c = None if c is None else self._downscale_roi(c)
                 else:
                     # The crop itself moved like the box: turned about its

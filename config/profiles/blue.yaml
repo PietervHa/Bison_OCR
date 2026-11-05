@@ -50,3 +50,9 @@ ocr:
     # all. Off: every second band refuses the one-line format, as in the
     # first read (a two-line print is never read as one line).
     ink_retry: false
+    # The deskewed crop holds the whole located rect, also when the print
+    # lies along the frame edge at a large angle (text_locator.deskew_crop).
+    # Without it the first dot column of "6303" was cut off on a print
+    # along the right edge turned 88 degrees and read as "5303" at digit
+    # confidence 1.0 (eval_blue, 20261105_110156_885.png).
+    deskew_whole_rect: true

@@ -621,7 +621,8 @@ def _normalize_rect_angle(rw: float, rh: float, angle: float) -> tuple[float, fl
     return rw, rh, angle
 
 
-def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0) -> Optional[np.ndarray]:
+def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0,
+                whole_rect: bool = False) -> Optional[np.ndarray]:
     """
     Straighten and crop *frame* to the rotated rect returned by
     locate_text_region(), so the printed line comes out horizontal
@@ -652,6 +653,17 @@ def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0
     reader, which tries both orientations (font_reader.py). The stages are
     complementary: this function handles "which way is the text tilted",
     the font reader handles "is it upside down".
+
+    whole_rect (dynamic_roi.deskew_whole_rect, off by default): the margin
+    is clamped to the frame and rotated on a canvas of the clamped size, so
+    a rect near the frame edge turned by a large angle lost the part that
+    rotates onto the clamped side - a print along the frame's right edge
+    turned 88 degrees came out with its first dot column cut off, and the
+    blue bottle's "6303" was read "5303" at digit confidence 1.0 (a 6
+    without its left column is a 5). With whole_rect the clamped margin is
+    padded back to its full size (edge pixels replicated, as warpAffine's
+    border does) before rotating: the crop holds the whole rect. Where the
+    margin stays inside the frame the crop is the same as without it.
 
     Returns None if the rect is degenerate or falls entirely outside frame.
     """
@@ -692,6 +704,9 @@ def deskew_crop(frame: np.ndarray, rotated_rect: dict, extra_padding_px: int = 0
         return None
 
     margin = frame[my1c:my2c, mx1c:mx2c]
+    if whole_rect and (mx1c, my1c, mx2c, my2c) != (mx1, my1, mx2, my2):
+        margin = cv2.copyMakeBorder(margin, my1c - my1, my2 - my2c, mx1c - mx1, mx2 - mx2c, cv2.BORDER_REPLICATE)
+        mx1c, my1c = mx1, my1
 
     # Center relative to the margin crop (not the full frame) now that
     # we've clamped to frame bounds.
