@@ -41,6 +41,7 @@ from backend.detection.ocr.code_validator import (CodeTemplate, LINE1, REJECT_FO
                                                   plausible_line1)
 from backend.detection.ocr import grid_jit
 from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
+from backend.detection.ocr.ink_channel import InkChannel
 from backend.detection.ocr.text_locator import (locate_text_region, locate_text_region_scaled, deskew_crop,
                                                 row_profile_rect, alternative_rects, extend_rect_along_line)
 from backend.utils.logger import get_logger
@@ -81,15 +82,23 @@ def _same_rect(a, b) -> bool:
 class OCRead:
     """
     Reads the printed code from a camera frame with the trained dot-font reader.
+
+    config: the whole configuration dict (default: the loaded config file,
+    backend.core.config_loader.cfg); a product profile passes the config
+    with its overrides merged in (backend/core/profiles.py). profile_name:
+    the profile's name, recorded in every result as "profile" (None = not
+    recorded).
     """
-    def __init__(self):
-        ocr_cfg = cfg["ocr"]
+    def __init__(self, config=None, profile_name=None):
+        config = cfg if config is None else config
+        ocr_cfg = config["ocr"]
+        self.profile_name = profile_name
         # OpenCV's own worker threads (performance.cv_threads): on these
         # small crops 1-8 threads read equally fast, but with more than one
         # every parallel call waits for its slowest worker - under load a
         # busy core stalled the read - and the workers don't run at the
         # vision thread's priority. Process-wide; None = OpenCV's default.
-        cv_threads = (cfg.get("performance") or {}).get("cv_threads")
+        cv_threads = (config.get("performance") or {}).get("cv_threads")
         if cv_threads is not None:
             cv2.setNumThreads(int(cv_threads))
         self.downscale = float(ocr_cfg["downscale"])
@@ -100,6 +109,11 @@ class OCRead:
         if self.speed.get("grid_jit"):
             grid_jit.available()
         self.min_dim = int(ocr_cfg["min_dim"])
+        # The image the print is found and read on (ink_channel.py): None =
+        # the camera frame as it is (grayscale ink, the standard profile);
+        # set = one weighted channel of B, G, R that the whole read uses.
+        self.ink_channel = InkChannel.from_config(ocr_cfg.get("ink_channel"))
+        self._debug_color = None
 
         # Dynamic ROI: locates the printed text block via classical CV,
         # since the text doesn't land in the same place on every bottle.
@@ -196,7 +210,9 @@ class OCRead:
             log.error("OCRead unavailable (%s) - every read will be NOK (ocr_engine_error).",
                       self.unavailable_reason)
         else:
-            log.info("OCRead: font reader, formats=%s", [f.lines for f in self._read_formats()])
+            log.info("OCRead%s: font reader, formats=%s%s", f" [{profile_name}]" if profile_name else "",
+                     [f.lines for f in self._read_formats()],
+                     f", ink channel {self.ink_channel.describe()}" if self.ink_channel else "")
             for lines in self.skipped_formats:
                 log.warning("OCRead: format %s skipped - the font reader model does not support it", lines)
 
@@ -220,6 +236,13 @@ class OCRead:
             self.dynamic_roi_debug_dir = debug_dir
             self.time_check = time_check
         return round((time.perf_counter() - t) * 1000, 1)
+
+    def ink_frame(self, frame):
+        """The frame as this engine reads it: its ink channel
+        (ocr.ink_channel, ink_channel.py) as a grey BGR image, or the frame
+        itself (the same object) without one. read() does this first;
+        QC_tools/train_font_reader.py does it before _prepare()."""
+        return frame if self.ink_channel is None else self.ink_channel.apply(frame)
 
     @property
     def validator(self):
@@ -342,7 +365,7 @@ class OCRead:
                                                         morph_threads=int(self.speed.get("locate_threads", 1))),
                                             float(self.speed.get("locate_scale", 1.0)),
                                             float(self.speed.get("locate_threshold_scale", 1.0)),
-                                            debug_dir=self.dynamic_roi_debug_dir)
+                                            debug_dir=self.dynamic_roi_debug_dir, debug_color=self._debug_color)
         self._last_located = located or None
         if not located:
             log.debug("Dynamic ROI: no text region found on this frame - running OCR on the full frame.")
@@ -598,15 +621,24 @@ class OCRead:
         a test image's file name; None = unknown, the check is skipped).
         """
         if self.font_reader is None:
-            return {
+            result = {
                 "detections": [],
                 "text": "",
                 "processing_time_ms": 0.0,
                 "mode": MODE,
                 "error": self.unavailable_reason or "font reader unavailable",
             }
+            if self.profile_name is not None:
+                result["profile"] = self.profile_name
+            return result
 
         t0 = time.perf_counter()
+        # Product profile with an ink channel (ink_channel.py): from here on
+        # the frame IS that channel - locate, crops, retries, agreement and
+        # the ink maps all use it. The colour frame is kept for the debug
+        # capture only. Without one the frame is used as it is.
+        self._debug_color = frame if self.ink_channel is not None and self.dynamic_roi_debug_dir else None
+        frame = self.ink_frame(frame)
         self._capture_time = capture_time
         if self.time_check and capture_time is None:
             if not self._time_skip_logged:
@@ -687,6 +719,8 @@ class OCRead:
         }
         if not accepted:
             result["failure_reason"] = reason
+        if self.profile_name is not None:
+            result["profile"] = self.profile_name
         if profile:
             result["_profile_ms"] = profile_data
         return result

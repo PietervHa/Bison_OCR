@@ -5,7 +5,7 @@
 ```
             ┌──────────────── Web HMI (FastAPI + HTML/JS, port 5000) ───────────────┐
             │  /  /status  /result  /video_feed  /camera_status                     │
-            │  /camera_rotation  /reset_counters                                    │
+            │  /camera_rotation  /reset_counters  /profiles  /profile               │
             └───────────────────────────────┬───────────────────────────────────────┘
                                             │
                               AppState (lock-protected)
@@ -39,6 +39,7 @@
 
 1. **Trigger**: the PLC sends the trigger byte, or someone presses `Q`.
 2. **Frame**: the latest frame from the camera. If there is no frame, the TCP server records `camera_unavailable` and answers `NOK`.
+2b. **Ink channel** (product profile with `ocr.ink_channel`, `ink_channel.py`): the frame is turned into that one channel; every step below uses it. Without one (standard profile) the frame is used as it is.
 3. **Locate** (`text_locator.locate_text_region`): blackhat ink map, long rib lines erased, components clustered into the text block. Returns a rotated rect, or `None` (then the full frame is read).
 4. **Crop** (`text_locator.deskew_crop`): straightened crop with 20 px extra margin. Then `ocr.downscale`/`min_dim` (no-op for today's crop size).
 5. **Font reader** (`font_reader.FontReader.read`): `dot_text.clean_dot_text` cleanup, grid segmentation, classifier per character cell, both orientations tried. Returns lines, text, `literal_score` and the lowest digit confidence, or `None`. This runs once per configured format the model supports (`ocr.read_validation.templates`); a one-line format on a crop that holds two lines gives `None`.
@@ -77,9 +78,16 @@ With `ocr.dynamic_roi.debug_save: true`, each read writes a folder `data/debug/d
                                                "literal_score": -0.2, "min_token_confidence": 0.99}, "..."]}]},
   "processing_time_ms": 412.3,
   "cycle_time_ms": 420.1,
+  "profile": "standard",
   "timestamp": "2026-10-13T09:43:03.123456"
 }
 ```
+
+`profile` is the product profile the read was made with (`config/profiles/<name>.yaml`). For results without a read (`camera_unavailable`, `vision_timeout`, ...) it is the profile that was active.
+
+## Product profiles
+
+`backend/core/profiles.py` loads `config/profiles/<name>.yaml` and merges its `ocr:` section over the config file. `vision.switch_profile(name)` (HMI: `POST /profile`) builds the new `OCRead` on the vision thread itself, queued like a read: the running read finishes with the old profile, reads queued after the switch use the new one, and no read runs during the swap. A profile that cannot be loaded or cannot read is refused; the active profile stays. The choice is saved in `data/active_profile_<config file>.txt` and used at the next start (`profiles.remember`); a saved profile that no longer loads falls back to `standard`. With an ink channel, a debug capture's `text_locator_search.png` is still the camera frame; `text_locator_ink_channel.png` is the channel searched.
 
 A NOK result has `"status": "NOK"` and a `failure_reason`. A technical failure also has `"error"`.
 
@@ -105,6 +113,10 @@ A NOK result has `"status": "NOK"` and a `failure_reason`. A technical failure a
 | `camera_unavailable` | TCP trigger, but the camera had no frame |
 | `vision_start_failed` | TCP trigger, but the read could not be started |
 | `vision_timeout` | TCP trigger, no result within `trigger.timeout_s` |
+
+## Camera rotation, counter reset, product profile
+
+`GET /profiles` lists the profiles and the active one (polled by the HMI); `POST /profile {"name": ...}` switches (400 with the reason when refused). Like rotation and reset, no login; the HMI asks for confirmation.
 
 ## Camera rotation and counter reset
 

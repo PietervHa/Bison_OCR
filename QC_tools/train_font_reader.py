@@ -36,6 +36,12 @@ set the new model never sees. The new model starts from the current one and
 adds the letters E, X and P. Writes the model (.npz, same format as
 backend/detection/ocr/models/font_reader.npz) and a JSON report.
 
+--profile NAME: locate, crop and make the ink map as product profile NAME
+does (config/profiles/NAME.yaml: its locator settings, ink channel and
+formats), so the model learns the cells it will be given when it reads with
+that profile. The blue bottle's model:
+    python -m QC_tools.train_font_reader data/blue_shots --labels-from-folders --profile blue --out models_new/blue/font_reader_blue.npz
+
 Usage:
     python -m QC_tools.train_font_reader <images_dir> --out models_new/font_reader.npz
     python -m QC_tools.train_font_reader <images_dir> --scorer models_new/font_reader.npz --out models_new/font_reader_2.npz
@@ -225,9 +231,11 @@ def flat(template_lines, text_lines):
 
 
 def crop_of(engine, img, max_width):
+    """The crop the engine reads: located and deskewed on the engine's ink
+    channel (the image itself without one, OCRead.ink_frame)."""
     if img.shape[1] > max_width:
         img = cv2.resize(img, (max_width, round(img.shape[0] * max_width / img.shape[1])), interpolation=cv2.INTER_AREA)
-    return engine._prepare(img)[0]
+    return engine._prepare(engine.ink_frame(img))[0]
 
 
 # A fixed character the current model knows (":", "/", "B", O as 0) must read
@@ -408,15 +416,25 @@ def debug_image(path, crop, t, date, formats, out_dir, scale=3):
 _WORKER = {}
 
 
-def _init_worker(scorer_path, max_width):
+def _init_worker(scorer_path, max_width, profile=None):
     """Per labelling process: the OCRead engine (for the crop and the
-    configured formats) and the scorer model."""
+    configured formats; with profile: that product profile's) and the
+    scorer model."""
     from backend.detection.ocread.engine import OCRead
     if multiprocessing.parent_process() is not None:
         # Not the OCRead startup warnings once per process (formats the
         # production model skips; labelling uses the scorer, not OCRead's reader).
         logging.disable(logging.WARNING)
-    engine = OCRead()
+    if profile:
+        from backend.core.profiles import config_for
+        c = config_for(profile)
+        # Only its locate / crop / ink channel and formats are used here (the
+        # scorer labels): the shared model, so a profile whose own model is
+        # still to be trained loads too.
+        c["ocr"].setdefault("read_validation", {}).setdefault("font_reader", {})["model"] = ""
+        engine = OCRead(c, profile_name=profile)
+    else:
+        engine = OCRead()
     for a in ("debug_dir", "dynamic_roi_debug_dir"):
         if hasattr(engine, a):
             setattr(engine, a, None)
@@ -496,11 +514,14 @@ def main(argv=None):
                     help="only write debug images (locator crop, fitted bands and cells per format and "
                          "orientation) for these file names in <images> to --debug-dir, then exit; no training")
     ap.add_argument("--debug-dir", type=Path, default=None, help="default: <--out folder>/debug")
+    ap.add_argument("--profile", default=None, metavar="NAME",
+                    help="locate, crop and ink map as product profile NAME (config/profiles/NAME.yaml), and its "
+                         "formats; default: the config file")
     args = ap.parse_args(argv)
 
     if args.debug_images:
         debug_dir = args.debug_dir or args.out.parent / "debug"
-        _init_worker(str(args.scorer), args.max_width)
+        _init_worker(str(args.scorer), args.max_width, args.profile)
         by_name = {p.name: p for p in args.images.rglob("*")}
         for name in args.debug_images:
             p = by_name.get(name)
@@ -520,7 +541,11 @@ def main(argv=None):
     per_day = defaultdict(list)
     fixed = {}
     if args.labels_from_folders:
-        from backend.core.config_loader import cfg as _cfg
+        if args.profile:
+            from backend.core.profiles import config_for
+            _cfg = config_for(args.profile)
+        else:
+            from backend.core.config_loader import cfg as _cfg
         rv = (_cfg.get("ocr", {}) or {}).get("read_validation", {}) or {}
         formats = rv.get("templates") or [rv.get("template")]
         not_a_code = Counter()
@@ -555,7 +580,7 @@ def main(argv=None):
     t0 = time.time(); samples = []; skipped = Counter(); no_fit = []; line1_chosen = Counter(); rejected = []
     jobs = [(p, t, fixed[p]["date"] if p in fixed else args.date, args.min_fit, fixed.get(p))
             for items in per_day.values() for p, t in items]
-    init = (str(args.scorer), args.max_width)
+    init = (str(args.scorer), args.max_width, args.profile)
     if args.workers > 1:
         pool = multiprocessing.Pool(args.workers, initializer=_init_worker, initargs=init)
         results = pool.imap(_label_image, jobs, chunksize=4)
@@ -622,7 +647,8 @@ def main(argv=None):
         if per_reason[reason] <= 6:
             rows.append((fit["cells"], fit["labels"], f"{reason} - {name}"))
     write_sheet(args.out.parent / "rejected_sheet.png", rows)
-    report = {"images": len(files), "scorer": str(args.scorer), "used": len(samples), "skipped": dict(skipped),
+    report = {"images": len(files), "profile": args.profile, "scorer": str(args.scorer), "used": len(samples),
+              "skipped": dict(skipped),
               # Images left out (reasons in "skipped", examples in
               # rejected_sheet.png); a new print format shows up here.
               "no_fit_images": no_fit,

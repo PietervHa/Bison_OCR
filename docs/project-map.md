@@ -7,6 +7,7 @@ Bison_OCR/
 │   ├── core/
 │   │   ├── camera.py               # capture worker + supervisor, reconnect, device lookup by name
 │   │   ├── config_loader.py        # loads config/default.yaml (or --config) and .env -> cfg
+│   │   ├── profiles.py             # product profiles: config/profiles/<name>.yaml merged over cfg["ocr"]
 │   │   ├── state.py                # AppState: last result, counters, rotation
 │   │   ├── tcp_trigger_server.py   # PLC trigger byte in, code text / NOK out
 │   │   └── vision.py               # runs OCRead in a worker thread, decides OK/NOK
@@ -14,6 +15,7 @@ Bison_OCR/
 │   │   ├── ocread/
 │   │   │   └── engine.py           # OCRead.read(frame): locate -> crop -> font reader -> validate -> result
 │   │   └── ocr/
+│   │       ├── ink_channel.py      # per-profile ink channel (blue channel for the blue bottle)
 │   │       ├── text_locator.py     # finds and deskews the printed text block
 │   │       ├── dot_text.py         # dot-print cleanup (used by the font reader)
 │   │       ├── font_reader.py      # classifier trained on the printer's dot font
@@ -34,7 +36,8 @@ Bison_OCR/
 │   ├── q_trigger.py                # PLC trigger test (TCP or Q key)
 │   ├── ocread_session_report.py    # report from a results JSONL file
 │   └── camera_stability.py         # exposure stability check
-├── config/default.yaml
+├── config/default.yaml, production.yaml
+├── config/profiles/                # standard.yaml, blue.yaml (product profiles)
 ├── tests/                          # unittest suite + fixtures/font_reader/*.png, camera_test.py (manual)
 ├── docs/                           # this documentation + VisionLinkTest.st (PLC side)
 ├── data/                           # runtime only, not in git: results/, logs/, debug/
@@ -52,3 +55,5 @@ Bison_OCR/
 | `GET /camera_status` | – | camera connected flag |
 | `POST /camera_rotation` | – | rotate the image 90° |
 | `POST /reset_counters` | – | reset OK/NOK/total (HMI asks for confirmation) |
+| `GET /profiles` | – | product profiles and the active one |
+| `POST /profile` | – | switch the product profile (HMI asks for confirmation) |

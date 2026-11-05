@@ -20,6 +20,9 @@
             </div>
         </div>
         <div class="header-right">
+            <label class="profile-picker" for="profileSelect">PRODUCT:
+                <select id="profileSelect" title="Product profile - switches how the code is read"></select>
+            </label>
             <span class="station-id">STATION: <span id="machineIdLabel">DEFAULT</span></span>
         </div>
     </div>
@@ -52,6 +55,7 @@
             <div id="status" class="status nok">
                 NO RESULT
             </div>
+            <div class="result-profile">Read with profile: <span id="resultProfile">-</span></div>
 
             <div class="info-box">
                 <h2 id="detectionsHeading">Recognized Text</h2>

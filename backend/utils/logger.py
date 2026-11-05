@@ -13,7 +13,7 @@ from pathlib import Path
 
 # Endpoints the HMI polls every few hundred ms. Their access-log lines are
 # demoted to DEBUG so they stay out of the console and vision.log.
-_POLL_PATHS = frozenset({"/result", "/status", "/camera_status"})
+_POLL_PATHS = frozenset({"/result", "/status", "/camera_status", "/profiles"})
 _REQUEST_LINE = re.compile(r'"[A-Z]+ (/[^\s?"]*)')
 
 

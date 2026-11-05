@@ -7,6 +7,29 @@ All settings are in `config/default.yaml`. Start with `--config <path>` to use a
 | Key | Default | Meaning |
 |---|---|---|
 | `machine_id` | `"default"` | Station name shown in the HMI header |
+| `profiles.default` | `standard` | Product profile at startup |
+| `profiles.remember` | `true` | Start with the profile last chosen on the HMI (saved in `data/active_profile_<config file>.txt`), so an automatic restart keeps the product being run |
+
+## Product profiles – `config/profiles/<name>.yaml`
+
+A profile sets how one kind of product is read. Its `ocr:` section is merged over the config file's `ocr:` (mappings key by key; lists such as `templates` and every other value replaced whole). Only `label`, `description` and `ocr` are allowed: a profile cannot change the camera, the PLC trigger, the web server or the output, so the PLC behaviour is the same in every profile. The HMI's **PRODUCT** dropdown switches the profile without a restart (after the read that is running). A profile that cannot be loaded or cannot read (model missing, no supported format) is refused and the old one stays. Every result records its profile (`"profile"`), also in the JSONL file and the `VISION RESULT` log line.
+
+| Profile | For | What differs |
+|---|---|---|
+| `standard` | white, grey, silver and small bottles | nothing – the config file as it is (shared model `font_reader.npz`) |
+| `blue` | the blue HD-PE bottle | `ink_channel` = blue channel, `blackhat_threshold: 10`, `locate_blur_sigma: 0.4`, `ink_retry: false`, model `font_reader_blue.npz` (trained on site, not shipped – see `blue.yaml`) |
+
+A new product: copy `blue.yaml`, change what differs, check it with `python -m QC_tools.evaluate_images <shots> --profile <name> --labels-from-folders` and, for its own model, train with `--profile <name>` (see `docs/development.md`).
+
+### `ocr.ink_channel` (profiles)
+
+Not set in the config file: the frame is read as it is (grayscale, ink darker than the plastic). Set in a profile, the frame is turned into one channel `B*w0 + G*w1 + R*w2 + offset` first (`backend/detection/ocr/ink_channel.py`) and the whole read uses it – locator, crop, ink map, retries, agreement check. Ink must come out dark.
+
+| Key | Meaning |
+|---|---|
+| `weights_bgr` | `[w_B, w_G, w_R]`. Blue channel: `[1, 0, 0]`; warmth R − B (warm ink dark): `[1, 0, -1]` with `offset: 128` |
+| `offset` | Added before saturating to 0..255 |
+| `blur_sigma` | Gaussian smoothing of the channel (camera px), `0` = off |
 
 ## `ocr` – the OCRead pipeline
 
@@ -46,6 +69,7 @@ If the font reader can't be loaded, or supports none of the formats, the app sti
 | `min_cluster_components`, `cluster_max_gap_px` | `4`, `30` | Text-block clustering |
 | `line_extend_max_perp_px`, `line_extend_max_gap_px` | `18`, `90` | Extend the block along its own line |
 | `padding_px` | `25` | Margin around the located block |
+| `locate_blur_sigma` | not set (`0`) | Smooth the image before the blackhat, for locating only (a grainy surface or a noisy ink channel); the crop is cut from the unsmoothed image |
 | `debug_save` | `false` | Write per-read debug images and `font_reader.txt` |
 | `debug_dir` | `data/debug/dynamic_roi` | Where they go (relative to the project root) |
 

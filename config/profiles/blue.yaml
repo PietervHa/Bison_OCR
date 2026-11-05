@@ -1,0 +1,52 @@
+# Blue bottle: reddish-brown ink on blue-grey HD-PE, printed over large
+# embossed "HD-PE" letters, on a grainy surface. In grey the ink is only
+# ~0.2 darker than the plastic and the locator latched onto the recycling
+# triangle, the grain or the embossing (every read NOK format_mismatch /
+# no_text_detected with the standard profile).
+#
+# Only what differs from the config file is set here; everything else
+# (formats, checks, time budget, retries) is the config file's.
+label: "Blue bottle"
+description: "Ink found and read in the blue channel; own model (font_reader_blue.npz)."
+ocr:
+  # The image the print is found and read on (backend/detection/ocr/ink_channel.py):
+  # channel = B*w0 + G*w1 + R*w2 + offset, ink dark. The blue channel: ink
+  # absorbs blue, the plastic reflects it, the yellow glare of the rib is
+  # nearly gone and the embossing comes out light. Measured on 57 frames of
+  # two blue bottles, warmth (R - B: weights_bgr [1, 0, -1], offset 128 -
+  # warm ink comes out dark) read 0 of 57 with any blur: per pixel it is
+  # mostly colour noise. blur_sigma: light smoothing of the camera noise
+  # before the ink map (0 = off).
+  ink_channel:
+    weights_bgr: [1.0, 0.0, 0.0]
+    offset: 0
+    blur_sigma: 0.6
+
+  read_validation:
+    font_reader:
+      # The blue bottle's own model - NOT shipped: train it on blue-bottle
+      # shots, one folder per code with several codes and digits (see
+      # docs/development.md), then copy it here:
+      #   python -m QC_tools.train_font_reader data/blue_shots --labels-from-folders --profile blue --out models_new/blue/font_reader_blue.npz
+      # Until this file exists the HMI refuses to switch to this profile.
+      # Why not the shared model: on the soft-focus bottle (6303 10:45) it
+      # read 5 as 9 / 3 at digit confidence up to 0.999 (5 WRONG of 35).
+      # Why not the model trained on the two bottles available so far
+      # (models_new/blue_experimental): it read the white 6303 10:43 bottle
+      # as 10:45 - it learned those two codes, not the font.
+      model: backend/detection/ocr/models/font_reader_blue.npz
+
+  dynamic_roi:
+    # Ink in the blue channel is only 13-22 grey levels darker than the
+    # plastic around it (blackhat peak), against 60-100 on a white cap.
+    blackhat_threshold: 10
+    # Smooth the camera noise before the blackhat (locating only; the crop
+    # is cut from the unsmoothed channel). Without it the noise passed
+    # threshold 10 as 1300-3700 components per frame and reads timed out.
+    locate_blur_sigma: 0.4
+    # The printed-ink retries (ink_located, first_print_ink) and their
+    # "second band is not print" decision measure ink as darker than 0.6 x
+    # the plastic - blue-bottle ink is ~0.8, so they would see no print at
+    # all. Off: every second band refuses the one-line format, as in the
+    # first read (a two-line print is never read as one line).
+    ink_retry: false

@@ -26,6 +26,10 @@ Configuration loader for the machine vision application.
 Loads YAML configuration files and exposes a module-level cfg dictionary.
 """
 
+# The config file that was loaded (set by _load_config).
+config_path_loaded = None
+
+
 def _load_config():
     """Load configuration from YAML file (default or CLI override)."""
     parser = argparse.ArgumentParser(add_help=False)
@@ -39,6 +43,9 @@ def _load_config():
         config_path = Path(args.config)
     else:
         config_path = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
+
+    global config_path_loaded
+    config_path_loaded = config_path.resolve()
 
     # Check if file exists
     if not config_path.exists():

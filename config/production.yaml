@@ -9,6 +9,20 @@
 # Top-level settings
 machine_id: "default"
 
+# Product profiles (backend/core/profiles.py): config/profiles/<name>.yaml
+# overrides the ocr: section below for one kind of product (formats, locator
+# and ink settings, checks, model). The HMI's PRODUCT dropdown switches the
+# profile at runtime; every result records it ("profile"). The PLC
+# behaviour is the same in every profile.
+profiles:
+  # Profile at startup ("standard" = this file as it is).
+  default: standard
+  # Start with the profile last chosen on the HMI (saved in
+  # data/active_profile_<config file name>.txt), so an automatic restart
+  # (start_production.bat) keeps the product being run. false = always
+  # start with `default`.
+  remember: true
+
 # OCRead settings
 ocr:
   # downscale/min_dim shrink the located crop before it is read.
@@ -63,6 +77,11 @@ ocr:
     # Run one read on a synthetic frame when the engine starts
     # (OCRead.warmup), so the first real cycles are not slower.
     warmup: true
+
+  # ink_channel: not set here - the frame is read as it is (grayscale, ink
+  # darker than the plastic). A product profile can set it to read another
+  # channel, see config/profiles/blue.yaml and
+  # backend/detection/ocr/ink_channel.py.
 
   # Read validation (backend/detection/ocr/code_validator.py) and the
   # font reader that produces the code (backend/detection/ocr/font_reader.py,

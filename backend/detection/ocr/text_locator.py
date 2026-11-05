@@ -50,7 +50,8 @@ from backend.utils.roi import roi_to_pixels
 log = get_logger(__name__)
 
 
-def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str] = None) -> Optional[dict]:
+def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str] = None,
+                       debug_color: Optional[np.ndarray] = None) -> Optional[dict]:
     """
     Find the printed-text block inside *frame*.
 
@@ -61,6 +62,11 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
                    written here (mirrors the debug_ocr/ convention used
                    elsewhere). Leave unset in production - this is for
                    tuning the thresholds against real bottles.
+        debug_color: the camera frame when *frame* is a product profile's
+                   ink channel (ink_channel.py), for the debug capture only:
+                   text_locator_search.png is then the camera frame (as
+                   without a channel) and text_locator_ink_channel.png the
+                   channel searched; the bbox overlay is drawn on it.
 
     Returns:
         {"bbox": [x1, y1, x2, y2], "score": float} in *frame* pixel
@@ -91,6 +97,7 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
 
     search = frame[sy1:sy2, sx1:sx2]
     gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY) if search.ndim == 3 else search
+    gray = _locate_blur(gray, dyn_cfg)
 
     # Blackhat = closing(gray) - gray. Highlights small dark features
     # against a locally brighter background and largely cancels out broad,
@@ -202,7 +209,11 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     closed, labels, boxes, label_ids, areas = components(dark_mask)
 
     if debug_dir:
-        _write_debug(cycle_debug_dir, search=search, blackhat=blackhat, dark_mask=dark_mask, closed=closed)
+        if debug_color is None:
+            _write_debug(cycle_debug_dir, search=search, blackhat=blackhat, dark_mask=dark_mask, closed=closed)
+        else:
+            _write_debug(cycle_debug_dir, search=debug_color[sy1:sy2, sx1:sx2], ink_channel=search,
+                         blackhat=blackhat, dark_mask=dark_mask, closed=closed)
 
     min_components = int(dyn_cfg.get("min_cluster_components", 4))
     # First pass: tight, isotropic clustering. This is deliberately
@@ -372,7 +383,7 @@ def locate_text_region(frame: np.ndarray, dyn_cfg: dict, debug_dir: Optional[str
     )
 
     if debug_dir:
-        annotated = frame.copy()
+        annotated = (frame if debug_color is None else debug_color).copy()
         cv2.rectangle(annotated, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 0, 255), 2)
         box_pts = cv2.boxPoints(((rotated_rect["center"][0], rotated_rect["center"][1]), (rw, rh), angle))
         cv2.drawContours(annotated, [np.intp(box_pts)], 0, (0, 255, 0), 2)
@@ -397,7 +408,7 @@ _AREA_KEYS = {"min_component_area": 3, "max_component_area": 2000}
 
 
 def locate_text_region_scaled(frame: np.ndarray, dyn_cfg: dict, scale: float = 1.0, threshold_scale: float = 1.0,
-                              debug_dir: Optional[str] = None) -> Optional[dict]:
+                              debug_dir: Optional[str] = None, debug_color: Optional[np.ndarray] = None) -> Optional[dict]:
     """locate_text_region() on the frame scaled down by scale (INTER_AREA),
     with every pixel length in dyn_cfg scaled along (areas by scale^2) and
     blackhat_threshold by threshold_scale (scaling down averages a dot
@@ -405,9 +416,10 @@ def locate_text_region_scaled(frame: np.ndarray, dyn_cfg: dict, scale: float = 1
     mapped back to frame pixels: bbox, rotated_rect and ink_points. Without
     "_clusters" (next-best clusters are found on the full-size frame only:
     crop_retry_alternatives does nothing then). scale >= 1: as
-    locate_text_region()."""
+    locate_text_region(). debug_color: see locate_text_region (scaled with
+    the frame)."""
     if scale >= 1.0:
-        return locate_text_region(frame, dyn_cfg, debug_dir=debug_dir)
+        return locate_text_region(frame, dyn_cfg, debug_dir=debug_dir, debug_color=debug_color)
     small = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     c = dict(dyn_cfg)
     for key, default in _LENGTH_KEYS.items():
@@ -415,7 +427,10 @@ def locate_text_region_scaled(frame: np.ndarray, dyn_cfg: dict, scale: float = 1
     for key, default in _AREA_KEYS.items():
         c[key] = float(c.get(key, default)) * scale * scale
     c["blackhat_threshold"] = float(c.get("blackhat_threshold", 25)) * threshold_scale
-    located = locate_text_region(small, c, debug_dir=debug_dir)
+    c["locate_blur_sigma"] = float(c.get("locate_blur_sigma", 0.0) or 0.0) * scale
+    if debug_color is not None:
+        debug_color = cv2.resize(debug_color, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_AREA)
+    located = locate_text_region(small, c, debug_dir=debug_dir, debug_color=debug_color)
     if not located:
         return located
     inv, (h, w) = 1.0 / scale, frame.shape[:2]
@@ -496,6 +511,7 @@ def extend_rect_along_line(frame: np.ndarray, rect: dict, dyn_cfg: dict) -> Opti
         return None
     region = frame[y1:y2, x1:x2]
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if region.ndim == 3 else region
+    gray = _locate_blur(gray, dyn_cfg)
     k = max(1, int(dyn_cfg.get("blackhat_kernel_size", 25)))
     blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
     ys, xs = np.nonzero(blackhat > int(dyn_cfg.get("blackhat_threshold", 25)))
@@ -752,6 +768,17 @@ def _grow_over_print(cluster_ink: np.ndarray, mask: np.ndarray, close_kernel: np
         added |= near
         frontier = np.flatnonzero(near)
     return cluster_ink | np.isin(labels, ok[added])
+
+
+def _locate_blur(gray: np.ndarray, dyn_cfg: dict) -> np.ndarray:
+    """gray smoothed with locate_blur_sigma (camera px) before the blackhat,
+    for a grainy surface or a noisy ink channel (ink_channel.py): on the blue
+    bottle's B channel unsmoothed noise passed any threshold low enough for
+    the print (1300-3700 components per frame instead of 40-110). Locating
+    only - the crop is cut from the frame as it is. 0 / missing: gray as it
+    is (the same array)."""
+    sigma = float(dyn_cfg.get("locate_blur_sigma", 0.0) or 0.0)
+    return cv2.GaussianBlur(gray, (0, 0), sigma) if sigma > 0 else gray
 
 
 def _ink_sums(gray: np.ndarray, blackhat: np.ndarray, dyn_cfg: dict) -> np.ndarray:

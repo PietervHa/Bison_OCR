@@ -26,10 +26,20 @@ read and what was expected. --save-nok DIR copies the NOK/WRONG images with over
 image's read (text, outcome, reason, literal score, digit confidence,
 formats tried), to compare two runs image by image.
 
+--profile NAME reads with that product profile (config/profiles/NAME.yaml,
+backend/core/profiles.py), as the app does after choosing it on the HMI;
+without it, the config file as it is (= the standard profile).
+--labels-from-folders takes the expected code from each image's folder
+name instead of the file name, as train_font_reader.py does: e.g. folder
+"6303 10-45 BB 05-28" (':' and '/' written as '-'); images in other folders
+keep the file-name labels. Use it for shots of bottles printed earlier
+(the file name's time is then not the print time).
+
 Usage (from the repo root):
     python -m QC_tools.evaluate_images data/test_images
     python -m QC_tools.evaluate_images data/test_images --date 05/28 --report eval.json
     python -m QC_tools.evaluate_images data/test_images --first 100
+    python -m QC_tools.evaluate_images data/blue_images --profile blue --labels-from-folders
 """
 from __future__ import annotations
 
@@ -39,7 +49,7 @@ from pathlib import Path
 
 import cv2
 
-from QC_tools.train_font_reader import capture_time, format_name, label_lines, line1_candidates
+from QC_tools.train_font_reader import capture_time, folder_label, format_name, label_lines, line1_candidates
 
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp")
 
@@ -143,12 +153,20 @@ def main(argv=None):
     ap.add_argument("--save-nok", type=Path, default=None, metavar="DIR",
                     help="copy every NOK and WRONG image to DIR/<reason>/ and write overview sheets "
                          "(image + reason + expected code) to check whether a NOK was a bad print or a miss")
+    ap.add_argument("--profile", default=None, metavar="NAME",
+                    help="read with product profile NAME (config/profiles/NAME.yaml); default: the config file")
+    ap.add_argument("--labels-from-folders", action="store_true",
+                    help="expected code from the folder name, e.g. '6303 10-45 BB 05-28' (':' and '/' as '-')")
     args = ap.parse_args(argv)
 
     from backend.core.config_loader import cfg
     from backend.detection.ocread.engine import OCRead
     max_width = int((cfg.get("camera", {}) or {}).get("images_max_width", 744) or 0)
-    engine = OCRead()
+    if args.profile:
+        from backend.core.profiles import config_for
+        engine = OCRead(config_for(args.profile), profile_name=args.profile)
+    else:
+        engine = OCRead()
     engine.dynamic_roi_debug_dir = None                 # no debug captures for every image
     formats = [v.lines for v in engine.validators]      # ocr.read_validation.templates
     logging.disable(logging.WARNING)                    # not the engine's per-frame warnings
@@ -160,13 +178,14 @@ def main(argv=None):
     paths = {}
     for i, p in enumerate(files, 1):
         t = capture_time(p)
-        if t is None:
+        folder = folder_label(p.parent.name, formats) if args.labels_from_folders else None
+        if t is None and folder is None:
             skipped["no capture time in the name"] += 1; continue
         img = load_image(p, max_width)
         if img is None:
             skipped["unreadable file"] += 1; continue
         result = engine.read(img, capture_time=t)        # as test-image mode: the time in the file name
-        expected = expected_texts(t, args.date, formats)
+        expected = {" ".join(folder[1])} if folder else expected_texts(t, args.date, formats)
         kind, text, fmt = outcome(result, expected)
         read = ((result.get("validation") or {}).get("reads") or [{}])[0]
         paths[p.name] = p
@@ -190,10 +209,12 @@ def main(argv=None):
              for r in rows if r["outcome"] == "WRONG"]
     slowest = max(rows, key=lambda r: r["ms"])
     report = {"images": len(files), "evaluated": len(rows), "skipped": dict(skipped), "formats": formats,
+              "profile": args.profile, "labels_from_folders": args.labels_from_folders,
               "max_width": max_width, "date": args.date, "results": summary,
               "slowest_image": slowest["image"], "wrong": wrong,
               "per_image": [{k: v for k, v in r.items() if k != "expected"} for r in rows]}
 
+    print(f"profile: {args.profile or '(config file)'}")
     print(f"{'format':<12}{'images':>7}{'correct':>9}{'WRONG':>7}{'NOK':>6}{'avg ms':>9}{'max ms':>9}  NOK reasons")
     for name, s in summary.items():
         reasons = ", ".join(f"{k} {v}" for k, v in s["nok_reasons"].items())

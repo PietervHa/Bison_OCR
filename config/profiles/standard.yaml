@@ -1,0 +1,7 @@
+# Standard profile: white, grey, silver and small bottles.
+# No overrides - the config file (default.yaml / production.yaml) as it is,
+# with the shared font reader model. Keep `ocr:` empty: the results of this
+# profile are then exactly those of the config file (tests/test_profiles.py).
+label: "Standard (white / grey / silver / small)"
+description: "The config file as it is: dark ink on a light cap, shared model."
+ocr: {}

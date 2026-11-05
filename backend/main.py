@@ -15,6 +15,7 @@ from pathlib import Path
 
 from backend.core.camera import Camera
 from backend.core.image_source import ImageFolderSource
+from backend.core import vision
 from backend.core.vision import run_vision, bind_app_state, capture_time_of
 from backend.core.tcp_trigger_server import TCPTriggerServer
 from frontend.web import create_app
@@ -46,6 +47,10 @@ def _process_vision_result(result, trigger_time, app_state):
             **result,
             "cycle_time_ms": cycle_time_ms  # Total time from trigger to result
         }
+        # The product profile: the engine's own for a read (the one it was
+        # really read with), the active one for camera/timeout results.
+        if result_dict.get("profile") is None:
+            result_dict["profile"] = vision.active_profile
         app_state.update_result(result_dict)
         app_state.increment_counter(status)
 
@@ -60,9 +65,10 @@ def _process_vision_result(result, trigger_time, app_state):
 
         if failure_reason:
             log.warning(
-                "VISION RESULT: status=%s reason=%s cycle_time_ms=%s confidence=%s detections=%s",
+                "VISION RESULT: status=%s reason=%s profile=%s cycle_time_ms=%s confidence=%s detections=%s",
                 status,
                 failure_reason,
+                result_dict["profile"],
                 cycle_time_ms,
                 confidence,
                 detection_count,
@@ -70,8 +76,9 @@ def _process_vision_result(result, trigger_time, app_state):
         else:
             validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
             log.info(
-                "VISION RESULT: status=%s cycle_time_ms=%s confidence=%s detections=%s format=%s",
+                "VISION RESULT: status=%s profile=%s cycle_time_ms=%s confidence=%s detections=%s format=%s",
                 status,
+                result_dict["profile"],
                 cycle_time_ms,
                 confidence,
                 detection_count,
@@ -202,7 +209,8 @@ def main():
         camera = make_frame_source(app_state)
 
         web_cfg = cfg["web"]
-        app = create_app(camera, app_state, start_cycle=lambda: start_vision_cycle(camera, app_state))
+        app = create_app(camera, app_state, start_cycle=lambda: start_vision_cycle(camera, app_state),
+                         profile_status=vision.profile_status, switch_profile=vision.switch_profile)
         web_thread = threading.Thread(
             target=lambda: uvicorn.run(
                 app,

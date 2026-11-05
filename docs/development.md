@@ -30,6 +30,7 @@ python -m pyflakes backend frontend QC_tools tests
 | `test_camera_device_lookup.py`, `test_camera_recovery.py` | device lookup by name, reconnect and frozen-frame handling (fake camera) |
 | `test_qc_tools.py` | session report, project-relative paths |
 | `test_unit_core.py` | AppState counters and snapshot |
+| `test_profiles.py` | profile files and merging (standard = the config file, only `ocr` can change), ink channel, standard profile reads exactly like the config file, the blue pipeline reads two real blue frames (`fixtures/profiles/`), runtime switch on the vision thread (a profile without its model is refused), `/profiles` routes |
 
 `tests/camera_test.py` is a manual script that shows the live camera in a window (`python -m tests.camera_test`). It is not a unit test.
 
@@ -59,8 +60,20 @@ This writes files on every read, so leave it off in production.
 
 The font reader reads formats of one or two lines made of digits plus the literals the model knows (`B`, `:` and `/` with the current model). The formats are listed in `ocr.read_validation.templates`; for a new format add it there and make sure `value_pattern` accepts it. A format the model does not support is skipped with a warning at startup; if it supports none of them, every read is NOK with `ocr_engine_error`. To support new characters (e.g. `EXP`, `PROD`), retrain with `python -m QC_tools.train_font_reader <images_dir>`, which takes its formats from the same `templates` setting. It adds the classes `E`, `X`, `P`, `R` and `D` (`O` is trained and read as `0`, the same glyph). Its report lists the images that fit none of the configured formats under `no_fit_images`, so a new print format shows up there.
 
+## A product profile's own model (e.g. the blue bottle)
+
+Put shots of the product in one folder per printed code, named after the code with `:` and `/` written as `-` (e.g. `data/blue_shots/6303 10-45 BB 05-28/`). Use several bottles with different codes, so every digit 0-9 occurs: a model trained on two codes learns those codes, not the font (`models_new/blue_experimental/NOT_FOR_PRODUCTION.txt`). Then:
+
+```powershell
+python -m QC_tools.evaluate_images data/blue_shots --profile blue --labels-from-folders          # before
+python -m QC_tools.train_font_reader data/blue_shots --labels-from-folders --profile blue --out models_new/blue/font_reader_blue.npz
+```
+
+`--profile` makes training locate, crop and build the ink map exactly as the profile reads (its ink channel and locator settings), so the model learns the cells it will see. Check the model on a bottle it was not trained on (train on all folders but one, point `blue.yaml`'s model at it, evaluate that one folder); WRONG must stay 0 - also with the blue profile on white bottles (an operator who forgot to switch back). Then copy it to `backend/detection/ocr/models/font_reader_blue.npz`, the path in `config/profiles/blue.yaml`.
+
 ## Rules worth keeping
 
 - A rejected read never carries a code: `text` is empty and `detections` is empty.
+- The `standard` profile has no `ocr:` overrides: it must read exactly as the config file does.
 - A technical failure is reported as `ocr_engine_error`, never as "no text".
 - The text sent to the PLC never contains a line break, and an over-long read is NOK rather than truncated.

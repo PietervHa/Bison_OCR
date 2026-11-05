@@ -52,6 +52,11 @@ async function updateResult() {
             }
         }
 
+        const resultProfileEl = document.getElementById("resultProfile");
+        if (resultProfileEl) {
+            resultProfileEl.textContent = result.profile ? profileLabel(result.profile) : "-";
+        }
+
         const timeValue = result.cycle_time_ms || result.processing_time_ms || 0;
         document.getElementById("time").textContent = timeValue + " ms";
 
@@ -145,6 +150,96 @@ function startCameraStatusPolling() {
 }
 
 
+
+/* =========================
+   PRODUCT PROFILES (config/profiles/<name>.yaml)
+   The dropdown shows the active profile; choosing another one asks for
+   confirmation, then the app switches without a restart. Polled, so every
+   HMI shows the same profile.
+========================= */
+let PROFILES = [];
+let ACTIVE_PROFILE = null;
+let PROFILE_SWITCH_BUSY = false;
+const PROFILE_POLL_MS = 3000;
+
+function profileLabel(name) {
+    const p = PROFILES.find(x => x.name === name);
+    return p ? p.label : name;
+}
+
+function renderProfiles() {
+    const sel = document.getElementById("profileSelect");
+    if (!sel) return;
+    const names = PROFILES.map(p => p.name).join("|");
+    if (sel.dataset.names !== names) {
+        sel.innerHTML = "";
+        for (const p of PROFILES) {
+            const opt = document.createElement("option");
+            opt.value = p.name;
+            opt.textContent = p.label;
+            opt.title = p.description || "";
+            sel.appendChild(opt);
+        }
+        sel.dataset.names = names;
+    }
+    if (ACTIVE_PROFILE) sel.value = ACTIVE_PROFILE;
+    const active = PROFILES.find(p => p.name === ACTIVE_PROFILE);
+    sel.title = active && active.description ? active.description : "Product profile";
+    sel.disabled = PROFILE_SWITCH_BUSY || PROFILES.length < 2;
+}
+
+async function loadProfiles() {
+    if (PROFILE_SWITCH_BUSY) return;
+    try {
+        const res = await fetch("/profiles", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        PROFILES = Array.isArray(data.profiles) ? data.profiles : [];
+        ACTIVE_PROFILE = data.active;
+        // Don't redraw while the operator has the list open.
+        if (document.activeElement !== document.getElementById("profileSelect")) renderProfiles();
+    } catch (e) {
+        console.error("Failed to load profiles:", e);
+    }
+}
+
+document.getElementById("profileSelect").addEventListener("change", async (e) => {
+    const name = e.target.value;
+    if (name === ACTIVE_PROFILE) return;
+    const confirmed = await showConfirmDialog({
+        title: "Switch product profile",
+        message: `Read the next bottles with profile "${profileLabel(name)}"? `
+            + `The current profile is "${profileLabel(ACTIVE_PROFILE)}".`,
+        confirmLabel: "Switch"
+    });
+    if (!confirmed) {
+        renderProfiles();
+        return;
+    }
+    PROFILE_SWITCH_BUSY = true;
+    renderProfiles();
+    try {
+        const res = await fetch("/profile", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+            PROFILES = Array.isArray(data.profiles) ? data.profiles : PROFILES;
+            ACTIVE_PROFILE = data.active;
+            showToast(`Profile: ${profileLabel(ACTIVE_PROFILE)}`, { type: "success" });
+        } else {
+            showToast(`Profile not switched: ${data.error || res.status}`, { type: "error" });
+        }
+    } catch (err) {
+        showToast("Profile not switched: no connection.", { type: "error" });
+    } finally {
+        PROFILE_SWITCH_BUSY = false;
+        renderProfiles();
+        e.target.blur();
+    }
+});
 
 /* =========================
    BUTTON EVENTS
@@ -255,7 +350,7 @@ async function stepTestImage(direction) {
 document.addEventListener("keydown", (e) => {
     if (!TEST_IMAGES_ACTIVE) return;
     const tag = (e.target && e.target.tagName) || "";
-    if (tag === "INPUT" || tag === "TEXTAREA" || document.querySelector(".modal-overlay:not([hidden])")) return;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.querySelector(".modal-overlay:not([hidden])")) return;
     if (e.key === "ArrowRight") { e.preventDefault(); stepTestImage("next"); }
     if (e.key === "ArrowLeft") { e.preventDefault(); stepTestImage("prev"); }
     if (e.key === " " || e.code === "Space") { e.preventDefault(); toggleTestImagePause(); }
@@ -269,6 +364,8 @@ async function init() {
         startResultPolling();
         startCameraStatusPolling();
         initTestImages();
+        loadProfiles();
+        setInterval(loadProfiles, PROFILE_POLL_MS);
     } catch (e) {
         console.error("Initialization failed:", e);
     }
