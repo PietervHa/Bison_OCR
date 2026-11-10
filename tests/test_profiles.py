@@ -125,6 +125,33 @@ class InkChannelTests(unittest.TestCase):
         self.assertIs(_locate_blur(gray, {"locate_blur_sigma": 0}), gray)
 
 
+class LargePrintTests(unittest.TestCase):
+    """font_reader.max_line_height_px and the large_print profile: characters
+    taller than the default 45 px line height were cut at the top and bottom
+    (the P21/1 KT cap, 6303 10:48: 0 of 30 read)."""
+
+    def test_profile_only_raises_the_line_height(self):
+        c = profiles.config_for("large_print")
+        self.assertEqual(c["ocr"]["read_validation"]["font_reader"]["max_line_height_px"], 64)
+        c["ocr"]["read_validation"]["font_reader"].pop("max_line_height_px")
+        self.assertEqual(c, cfg)
+
+    def test_engines(self):
+        from backend.detection.ocread.engine import OCRead
+        self.assertEqual(OCRead(profiles.config_for("large_print")).speed["max_line_height_px"], 64)
+        self.assertNotIn("max_line_height_px", OCRead(profiles.config_for("standard")).speed)
+
+    def test_line_search_ceiling(self):
+        from backend.detection.ocr.font_reader import MAX_LINE_HEIGHT_PX, _fit_lines
+        fit = np.zeros((200, 300), np.float32)
+        fit[20:75] = 1.0                                  # two text lines, 55 px tall
+        fit[100:155] = 1.0
+        self.assertEqual(MAX_LINE_HEIGHT_PX, 45)
+        heights = lambda bands: [y1 - y0 for y0, y1 in bands]
+        self.assertEqual(heights(_fit_lines(fit, 2)[1]), [45, 45])                 # cut: the default
+        self.assertEqual(heights(_fit_lines(fit, 2, max_h=64)[1]), [55, 55])
+
+
 class DeskewWholeRectTests(unittest.TestCase):
     """deskew_crop(whole_rect=True), the blue profile's deskew_whole_rect: a
     print along the frame edge turned ~90 degrees lost the part of the crop

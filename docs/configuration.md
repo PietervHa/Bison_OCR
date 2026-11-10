@@ -18,6 +18,7 @@ A profile sets how one kind of product is read. Its `ocr:` section is merged ove
 |---|---|---|
 | `standard` | white, grey, silver and small bottles | nothing – the config file as it is (shared model `font_reader.npz`) |
 | `blue` | the blue HD-PE bottle | `ink_channel` = blue channel, `blackhat_threshold: 10`, `locate_blur_sigma: 0.4`, `ink_retry: false`, `deskew_whole_rect: true`, model `font_reader_blue.npz` (trained on site, not shipped – see `blue.yaml`) |
+| `large_print` | caps with a large print (the P21/1 KT cap) | `font_reader.max_line_height_px: 64` – text lines up to 64 px tall instead of 45. Not for the X-rib cap: its rib-damaged digits then get read, some wrongly |
 
 A new product: copy `blue.yaml`, change what differs, check it with `python -m QC_tools.evaluate_images <shots> --profile <name> --labels-from-folders` and, for its own model, train with `--profile <name>` (see `docs/development.md`).
 
@@ -45,6 +46,7 @@ Not set in the config file: the frame is read as it is (grayscale, ink darker th
 | `font_reader.model` | `''` | `''` = `backend/detection/ocr/models/font_reader.npz`. Verification models live in `models/verification/` (see below). |
 | `font_reader.min_literal_score` | `-1.0` | `B`, `:` and `/` must look like themselves (mean log-probability). Rejects garbled cuts and wrong orientation as `format_mismatch`. |
 | `font_reader.min_digit_confidence` | `0.0` | Lowest allowed digit confidence, otherwise `low_confidence` |
+| `font_reader.max_line_height_px` | not set (`45`) | Tallest text line the reader tries, in crop px. Characters taller than this are cut at the top and bottom and no format fits (`format_mismatch`). Set in the `large_print` profile |
 | `templates` | `["#### ##:##", "BB ##/##"]`, `["#### ##:##", "EXP ##/##"]`, `["#### ##:##", "PROD ##/##"]`, `["#### ##:##"]` | The print formats in use. Each format is a list with one entry per printed line: `#` digit, `A` letter, `*` any character, space = field gap, anything else literal. The font reader reads formats of one or two lines. A format with characters the model doesn't know (`E`, `X`, `P`, `R`, `D` with the current model) is skipped with a warning at startup. A literal `O` is scored as `0`: in this dot font they are the same glyph. Digit positions are never mapped. |
 | `template` | – | The older single-format key, e.g. `["#### ##:##", "BB ##/##"]`. Only used when `templates` is absent. |
 | `value_pattern` | hour/minute/month regex, `BB`/`EXP`/`PROD` line optional | Regex the canonical code must fully match, for every format, otherwise `invalid_value`. `''` disables it. |

@@ -134,11 +134,18 @@ def _deskew(ink, max_deg=30.0, first_deg=8.0, cache=None):
     return float(max(np.arange(coarse - 2.0, coarse + 2.01, 0.5), key=sharp))
 
 
-def _fit_lines(fit, n_lines=2):
+# Tallest text line (band) the line search tries, in crop px: characters
+# taller than this are cut at the top and bottom and no format fits.
+# ocr.read_validation.font_reader.max_line_height_px overrides it (passed in
+# the PreparedCrop's speed dict); not set = this value.
+MAX_LINE_HEIGHT_PX = 45
+
+
+def _fit_lines(fit, n_lines=2, max_h=MAX_LINE_HEIGHT_PX):
     """Best n_lines (1 or 2) equal-height text bands: (score, [(y0, y1), ...])."""
     r = fit.sum(axis=1); H = len(r); t = 0.25 * r.max(); c = np.r_[0.0, np.cumsum(r - t)]
     best = (-1e18, None)
-    for h in range(8, min(45, H // 2) + 1):
+    for h in range(8, min(int(max_h), H // 2) + 1):
         if n_lines == 1:
             ys = np.arange(0, H - h + 1)
             s = c[ys + h] - c[ys]
@@ -478,7 +485,8 @@ class PreparedCrop:
                 H = self._rot("raw", False, ang).shape[0]
                 self._bands[key] = (score, None if bands is None else [(H - y1, H - y0) for y0, y1 in bands[::-1]])
             else:
-                self._bands[key] = self._timed("band_fit", _fit_lines, self._rot("raw", False, ang), n_lines)
+                self._bands[key] = self._timed("band_fit", _fit_lines, self._rot("raw", False, ang), n_lines,
+                                               self.speed.get("max_line_height_px", MAX_LINE_HEIGHT_PX))
         return self._bands[key]
 
     def angle(self, first_deg=8.0):
