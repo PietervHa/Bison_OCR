@@ -135,9 +135,13 @@ def _deskew(ink, max_deg=30.0, first_deg=8.0, cache=None):
 
 
 # Tallest text line (band) the line search tries, in crop px: characters
-# taller than this are cut at the top and bottom and no format fits.
-# ocr.read_validation.font_reader.max_line_height_px overrides it (passed in
-# the PreparedCrop's speed dict); not set = this value.
+# taller than this are cut at the top and bottom and no format fits. When
+# the best lines are this tall (the search hit the limit, so the text may
+# be taller) and ocr.read_validation.font_reader.tall_line_height_px is set
+# (passed in the PreparedCrop's speed dict), the lines are searched again up
+# to that height. Measured 2026-11-10: the P21/1 KT cap's characters are
+# taller than 45 px - 0 of 30 read, 28 of 30 with tall lines up to 64 px;
+# prints that fit in 45 px are not searched again, so they read as before.
 MAX_LINE_HEIGHT_PX = 45
 
 
@@ -475,6 +479,16 @@ class PreparedCrop:
                 self._rotated[key] = _rotate(self.ink()[0 if which == "boosted" else 1], ang)
         return self._rotated[key]
 
+    def _fit_tall(self, fit, n_lines):
+        """_fit_lines(); searched again up to tall_line_height_px when every
+        best line is MAX_LINE_HEIGHT_PX tall (the text may be taller)."""
+        best = _fit_lines(fit, n_lines)
+        tall = int(self.speed.get("tall_line_height_px") or 0)
+        if tall > MAX_LINE_HEIGHT_PX and best[1] is not None and all(
+                y1 - y0 >= MAX_LINE_HEIGHT_PX for y0, y1 in best[1]):
+            return _fit_lines(fit, n_lines, tall)
+        return best
+
     def _lines(self, flip, ang, n_lines):
         """_fit_lines() on the rotated fit ink; flipped: the upright bands
         mirrored (same score, the bands in reading order of the flipped crop)."""
@@ -485,8 +499,7 @@ class PreparedCrop:
                 H = self._rot("raw", False, ang).shape[0]
                 self._bands[key] = (score, None if bands is None else [(H - y1, H - y0) for y0, y1 in bands[::-1]])
             else:
-                self._bands[key] = self._timed("band_fit", _fit_lines, self._rot("raw", False, ang), n_lines,
-                                               self.speed.get("max_line_height_px", MAX_LINE_HEIGHT_PX))
+                self._bands[key] = self._timed("band_fit", self._fit_tall, self._rot("raw", False, ang), n_lines)
         return self._bands[key]
 
     def angle(self, first_deg=8.0):

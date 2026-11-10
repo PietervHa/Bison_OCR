@@ -191,10 +191,11 @@ class OCRead:
         self.unavailable_reason = None
         fr_cfg = val_cfg.get("font_reader") if isinstance(val_cfg.get("font_reader"), dict) else {}
         try:
-            # Tallest text line the reader tries (font_reader.MAX_LINE_HEIGHT_PX,
-            # 45 px when not set): handed to every PreparedCrop with speed.
-            if fr_cfg.get("max_line_height_px"):
-                self.speed["max_line_height_px"] = int(fr_cfg["max_line_height_px"])
+            # Text taller than font_reader.MAX_LINE_HEIGHT_PX (45 px): lines
+            # searched again up to this height (handed to every PreparedCrop
+            # with speed). Not set / 0: off.
+            if fr_cfg.get("tall_line_height_px"):
+                self.speed["tall_line_height_px"] = int(fr_cfg["tall_line_height_px"])
             model = fr_cfg.get("model") or None
             font_reader = FontReader(
                 resolve_project_path(model) if model else None,

@@ -35,6 +35,10 @@ ocr:
       # (models_new/blue_experimental): it read the white 6303 10:43 bottle
       # as 10:45 - it learned those two codes, not the font.
       model: backend/detection/ocr/models/font_reader_blue.npz
+      # The taller text-line search of the config file (P21/1 KT cap) took
+      # the wrong lines in the blue channel's noise: 42 -> 1 of 57 blue
+      # frames read (2026-11-10). Off here.
+      tall_line_height_px: 0
 
   dynamic_roi:
     # Ink in the blue channel is only 13-22 grey levels darker than the

@@ -153,6 +153,7 @@ ocr:
       # through the "6" (tests/fixtures/font_reader/4113_rib_through_6.png,
       # 0.918).
       min_digit_confidence: 0.7
+      tall_line_height_px: 64
     # The print formats the line uses; each is a list with one entry per
     # printed line. # = digit, A = letter, * = any character, space = gap
     # between fields, anything else must be printed literally.
