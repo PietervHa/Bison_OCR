@@ -489,17 +489,19 @@ class PreparedCrop:
             return _fit_lines(fit, n_lines, tall)
         return best
 
-    def _lines(self, flip, ang, n_lines):
+    def _lines(self, flip, ang, n_lines, tall=False):
         """_fit_lines() on the rotated fit ink; flipped: the upright bands
-        mirrored (same score, the bands in reading order of the flipped crop)."""
-        key = (flip, ang, n_lines)
+        mirrored (same score, the bands in reading order of the flipped crop).
+        tall: _fit_tall() instead (lines taller than MAX_LINE_HEIGHT_PX)."""
+        key = (flip, ang, n_lines, tall)
         if key not in self._bands:
             if flip:
-                score, bands = self._lines(False, ang, n_lines)
+                score, bands = self._lines(False, ang, n_lines, tall)
                 H = self._rot("raw", False, ang).shape[0]
                 self._bands[key] = (score, None if bands is None else [(H - y1, H - y0) for y0, y1 in bands[::-1]])
             else:
-                self._bands[key] = self._timed("band_fit", self._fit_tall, self._rot("raw", False, ang), n_lines)
+                self._bands[key] = self._timed("band_fit", self._fit_tall if tall else _fit_lines,
+                                               self._rot("raw", False, ang), n_lines)
         return self._bands[key]
 
     def angle(self, first_deg=8.0):
@@ -530,7 +532,13 @@ class PreparedCrop:
         centre half a pixel off and can differ by a pixel)."""
         ang = self.angle(first_deg)
         f = self._rot("raw", flip, ang)
-        score, bands = self._lines(flip, ang, len(template))
+        # Taller lines (tall_line_height_px) only for reading a two-line
+        # format: a one-line format, its second-line check and the printed
+        # ink of a second band keep the 45 px search - with taller lines the
+        # embossing beside a one-line print counted as a second line and the
+        # print was refused (OCReadEmbossingTests, 3 one-line test images).
+        tall = len(template) == 2 and bool(self.speed.get("tall_line_height_px"))
+        score, bands = self._lines(flip, ang, len(template), tall)
         fits = []
         for band, tl in zip(bands, template):
             near = line_pitch(fits[0]) if fits else None

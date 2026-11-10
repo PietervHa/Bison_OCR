@@ -151,6 +151,24 @@ class TallLineTests(unittest.TestCase):
         small = self._fit(30)                                                           # fits: not searched again
         self.assertEqual(on._fit_tall(small, 2), _fit_lines(small, 2))
 
+    def test_only_two_line_formats_use_it(self):
+        # A one-line format and its second-line check keep the 45 px search:
+        # with taller lines, embossing beside a one-line print counted as a
+        # second line and the print was refused.
+        from backend.detection.ocr.font_reader import PreparedCrop
+        prep = PreparedCrop(None, speed={"tall_line_height_px": 64})
+        fit = self._fit(55)
+        prep.angle = lambda first_deg=8.0: 0.0
+        prep._rot = lambda which, flip, ang: fit
+        calls, real = [], prep._lines
+        prep._lines = lambda flip, ang, n, tall=False: (calls.append((n, tall)), real(flip, ang, n, tall))[1]
+        prep.segment(["#### ##:##"], False)
+        self.assertEqual(calls, [(1, False), (2, False)])
+        calls.clear()
+        seg = prep.segment(["#### ##:##", "BB ##/##"], False)
+        self.assertEqual(calls, [(2, True)])
+        self.assertEqual([y1 - y0 for y0, y1 in seg["bands"]], [55, 55])
+
     def test_engine_setting(self):
         from backend.detection.ocread.engine import OCRead
         for tall, expected in ((64, 64), (0, None)):
