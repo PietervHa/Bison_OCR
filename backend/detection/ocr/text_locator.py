@@ -996,10 +996,12 @@ def _erase_long_lines(mask: np.ndarray, min_length: int = 90, thickness: int = 6
 
 
 def _longest_ink_runs(mask: np.ndarray, segments: list) -> list:
-    """_longest_ink_run() of every segment (x1, y1, x2, y2), in one batch:
-    the samples of all segments in one array, each sample computed as
-    np.linspace does it - the same numbers, without ~15 small numpy calls
-    per segment (a quarter of locating the print)."""
+    """Longest unbroken run of set pixels (px) along every segment (x1, y1,
+    x2, y2), counting a pixel as set when the mask is set on the line or 1 px
+    either side of it (a rib is a few px wide and Hough's line need not run
+    down its middle). In one batch: the samples of all segments in one array,
+    each sample computed as np.linspace does it, without ~15 small numpy
+    calls per segment (a quarter of locating the print)."""
     if not segments:
         return []
     seg = np.asarray(segments, np.float64)
@@ -1036,28 +1038,6 @@ def _longest_ink_runs(mask: np.ndarray, segments: list) -> list:
         runs = edges[1::2] - edges[::2]
         out.append(int(round(float(runs.max()) * float(step[k]))) if len(runs) else 0)
     return out
-
-
-def _longest_ink_run(mask: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> int:
-    """Longest unbroken run of set pixels (px) along the segment, counting a
-    pixel as set when the mask is set on the line or 1 px either side of it
-    (a rib is a few px wide and Hough's line need not run down its middle)."""
-    n = int(max(abs(x2 - x1), abs(y2 - y1))) + 1
-    xs, ys = np.linspace(x1, x2, n), np.linspace(y1, y2, n)
-    nx, ny = -(y2 - y1), x2 - x1
-    norm = max(1e-6, float(np.hypot(nx, ny)))
-    nx, ny = nx / norm, ny / norm
-    h, w = mask.shape[:2]
-    on = np.zeros(n, bool)
-    for o in (-1, 0, 1):
-        xx = np.clip(np.round(xs + o * nx).astype(int), 0, w - 1)
-        yy = np.clip(np.round(ys + o * ny).astype(int), 0, h - 1)
-        on |= mask[yy, xx] > 0
-    # Run lengths from the positions where on/off changes.
-    edges = np.flatnonzero(np.diff(np.r_[0, on.astype(np.int8), 0]))
-    runs = edges[1::2] - edges[::2]
-    step = float(np.hypot(x2 - x1, y2 - y1)) / max(1, n - 1)
-    return int(round(float(runs.max()) * step)) if len(runs) else 0
 
 
 def _write_debug(debug_dir: str, **named_images) -> None:

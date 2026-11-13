@@ -300,6 +300,3 @@ class TCPTriggerServer:
 
         return self._build_response(result)
 
-    def is_enabled(self) -> bool:
-        return self.enabled
-

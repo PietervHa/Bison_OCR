@@ -144,12 +144,10 @@ class CodeTemplate:
         self.lines = [str(line) for line in lines if str(line).strip()]
         if not self.lines:
             raise ValueError("code template needs at least one line")
-        self.patterns = [line.replace(" ", "") for line in self.lines]
         self.canonical_template = " ".join(self.lines)
         # Fields = space-separated groups of the template, in reading order.
         self.fields = [f for line in self.lines for f in line.split(" ") if f]
         # Positions in the canonical code that carry information (vs literals/spaces).
-        self.info_positions = [i for i, ch in enumerate(self.canonical_template) if ch in "#A*"]
         self.value_pattern = re.compile(value_pattern) if value_pattern else None
         self.min_confidence = float(min_confidence)
         self.max_corrections = int(max_corrections)

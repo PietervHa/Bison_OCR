@@ -62,6 +62,12 @@ The orchestration is `OCRead.read(frame)` in `backend/detection/ocread/engine.py
 
 ---
 
+## Product profiles
+
+The **PRODUCT** dropdown in the HMI header switches how the code is read, without a restart: `standard` (white, grey, silver and small bottles - the config file as it is) or `blue` (the blue HD-PE bottle: ink found in the blue channel, own model `font_reader_blue.npz`, trained on site). Profiles are `config/profiles/<name>.yaml` and override only the `ocr:` settings; the PLC behaviour is the same in every profile. Every result records its profile. See `docs/configuration.md`.
+
+---
+
 ## PLC connection (TCP)
 
 ```yaml
