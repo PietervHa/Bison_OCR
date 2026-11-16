@@ -65,9 +65,10 @@ def _process_vision_result(result, trigger_time, app_state):
 
         if failure_reason:
             log.warning(
-                "VISION RESULT: status=%s reason=%s profile=%s cycle_time_ms=%s confidence=%s detections=%s",
+                "VISION RESULT: status=%s reason=%s read=%r profile=%s cycle_time_ms=%s confidence=%s detections=%s",
                 status,
                 failure_reason,
+                result.get("rejected_text"),
                 result_dict["profile"],
                 cycle_time_ms,
                 confidence,

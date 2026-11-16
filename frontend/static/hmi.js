@@ -41,7 +41,9 @@ async function updateResult() {
             } else if (["format_mismatch", "low_confidence", "invalid_value", "unstable_read", "implausible_time", "text_too_long"].includes(result.failure_reason)) {
                 // Read was made but not accepted (read_validation): show why,
                 // plus what was read, so operators can see what it struggled with.
-                ocreadTextEl.textContent = `(not accepted: ${result.failure_reason}) ${result.text || ""}`.trim();
+                // A rejected read's decode is its best guess, not a reading.
+                const read = result.text || result.rejected_text || "";
+                ocreadTextEl.textContent = `(not accepted: ${result.failure_reason})${read ? ` read: ${read}` : ""}`;
             } else if (result.failure_reason) {
                 // Technical failure (camera unavailable, OCR engine error,
                 // timeout, ...) - kept visually distinct from a genuine

@@ -505,3 +505,6 @@ trigger:
   # read from the product is sent back instead (newline-terminated), and the
   # PLC is responsible for comparing it against the expected value.
 
+  # If true, the PLC will receive the text of the NOK result instead of just "NOK".
+  nok_with_text: true
+

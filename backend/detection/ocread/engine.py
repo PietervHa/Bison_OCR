@@ -25,7 +25,9 @@ read - failure_reason. backend/core/vision.py turns it into OK/NOK.
 
 A rejected read never carries a code: the font reader always fills every
 digit position with its best guess, so the decode of a rejected read is
-not a reading. It is only written to the debug capture.
+not a reading - "text" and "detections" stay empty. The decode is kept as
+"rejected_text", for display (HMI: after the reason) and, with
+trigger.nok_with_text, for the PLC after "NOK" - never as a code.
 """
 
 import os
@@ -723,6 +725,9 @@ class OCRead:
             "text": text,
             "processing_time_ms": round(elapsed, 1),
             "mode": MODE,
+            # What the reader made of a rejected read (its best guess, not a
+            # reading): shown after the reason, never used as the code.
+            **({"rejected_text": r["text"]} if r is not None and not accepted and r.get("text") else {}),
             "validation": {"accepted": accepted, "reason": reason, "reads": [read_summary], "fusion": None,
                            "format": validator.lines if validator else None},
         }
