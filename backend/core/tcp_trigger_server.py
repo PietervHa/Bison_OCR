@@ -43,6 +43,11 @@ class TCPTriggerServer:
         # newline) that will be sent to the PLC. Anything longer is turned
         # into a NOK instead - see _apply_text_length_limit().
         self.max_text_length = int(trig_cfg.get("max_text_length", 64))
+        # A rejected OCRead read: send "NOK <what was read>" instead of only
+        # "NOK" (see _build_response). Off by default - the PLC must check
+        # that the line STARTS with NOK (docs/VisionLinkTest.st) before this
+        # is switched on.
+        self.nok_with_text = bool(trig_cfg.get("nok_with_text", False))
 
         self._server_thread = None
         self._stop_event = threading.Event()
@@ -192,8 +197,23 @@ class TCPTriggerServer:
         """
         if result.get("mode") == "ocread" and result.get("status") == "OK":
             return (self._ocread_text(result) + "\n").encode("utf-8", errors="replace")
+        if result.get("status") != "OK" and self.nok_with_text:
+            rejected = self._rejected_text(result)
+            if rejected:
+                return self.response_nok.rstrip(b"\r\n") + b" " + rejected + b"\n"
 
         return self.response_ok if result.get("status") == "OK" else self.response_nok
+
+    def _rejected_text(self, result: dict) -> bytes:
+        """trigger.nok_with_text: what the reader made of a rejected read
+        ("rejected_text", its best guess - not a reading), on one line, for
+        the PLC to show after NOK. Empty when there is none or it is longer
+        than max_text_length (then plain NOK)."""
+        text = " ".join(str(result.get("rejected_text") or "").split())
+        data = text.encode("utf-8", errors="replace")
+        if not data or (self.max_text_length > 0 and len(data) > self.max_text_length):
+            return b""
+        return data
 
     def _trigger_vision_and_wait(self) -> bytes:
         """

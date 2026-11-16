@@ -105,6 +105,7 @@ If the font reader can't be loaded, or supports none of the formats, the app sti
 | `response_nok` | `"NOK\n"` | Sent for every NOK, camera failure, start failure or timeout |
 | `timeout_s` | `15.0` | Wait this long for a result before answering NOK (`vision_timeout`) |
 | `max_text_length` | `64` | Longer OK reads are sent as NOK (`text_too_long`). Keep this at or below the PLC receive buffer. |
+| `nok_with_text` | `false` | A rejected read is sent as `NOK <what was read>` instead of `NOK` (the reader's best guess, for display only; nothing read or longer than `max_text_length`: plain `NOK`). Switch on only after the PLC checks that the line starts with `NOK` (`docs/VisionLinkTest.st`) |
 
 ## Frame source (`camera`)
 

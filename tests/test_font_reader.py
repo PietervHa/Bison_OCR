@@ -132,6 +132,8 @@ class OCReadFontModeTests(unittest.TestCase):
         self.assertFalse(r["validation"]["accepted"])
         self.assertEqual(r["text"], "")
         self.assertEqual(r["detections"], [])
+        # Kept apart, for showing after the reason (HMI, trigger.nok_with_text).
+        self.assertEqual(r["rejected_text"], "8202 52:34 BB 97/34")
 
     def test_no_print_on_the_frame_is_no_text_detected(self):
         r = self._engine(None, print_found=False).read(np.full((480, 744, 3), 128, np.uint8))

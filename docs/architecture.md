@@ -83,6 +83,8 @@ With `ocr.dynamic_roi.debug_save: true`, each read writes a folder `data/debug/d
 }
 ```
 
+A rejected read keeps `text` empty and `detections` `[]`; what the reader made of it (its best guess, not a reading) is in `rejected_text` – shown on the HMI after the reason and, with `trigger.nok_with_text`, sent to the PLC as `NOK <rejected_text>`.
+
 `profile` is the product profile the read was made with (`config/profiles/<name>.yaml`). For results without a read (`camera_unavailable`, `vision_timeout`, ...) it is the profile that was active.
 
 ## Product profiles
