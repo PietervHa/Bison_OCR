@@ -70,6 +70,43 @@ class OCReadResponseTests(unittest.TestCase):
         response = _server(result, recorded)._trigger_vision_and_wait()
         self.assertEqual(response, b"NOK\n")
 
+    def test_rejected_read_sends_plain_nok_by_default(self):
+        recorded = []
+        result = _ocread("", status="NOK")
+        result.update(failure_reason="low_confidence", rejected_text="6303 10:49 BB 05/20")
+        response = _server(result, recorded)._trigger_vision_and_wait()
+        self.assertEqual(response, b"NOK\n")
+        self.assertEqual(recorded[0]["rejected_text"], "6303 10:49 BB 05/20")
+
+    def test_nok_with_text_sends_what_was_read_after_nok(self):
+        cases = [  # (rejected_text, response)
+            ("6303 10:49 BB 05/20", b"NOK 6303 10:49 BB 05/20\n"),
+            ("6303 10:49\nBB 05/20\r", b"NOK 6303 10:49 BB 05/20\n"),     # one line
+            (None, b"NOK\n"),                                                # nothing read
+            ("X" * 65, b"NOK\n"),                                            # over max_text_length
+        ]
+        for rejected, expected in cases:
+            with self.subTest(rejected=rejected):
+                recorded = []
+                result = _ocread("", status="NOK")
+                result["failure_reason"] = "low_confidence"
+                if rejected is not None:
+                    result["rejected_text"] = rejected
+                srv = _server(result, recorded)
+                srv.nok_with_text = True
+                self.assertEqual(srv._trigger_vision_and_wait(), expected)
+                self.assertEqual(recorded[0]["status"], "NOK")
+
+    def test_nok_with_text_never_turns_a_nok_into_a_code(self):
+        # The PLC tells OK from NOK by the start of the line: a NOK line
+        # always starts with NOK, an OK line is the code itself.
+        recorded = []
+        result = _ocread("", status="NOK")
+        result.update(failure_reason="unstable_read", rejected_text="4113 08:25 BB 05/26")
+        srv = _server(result, recorded)
+        srv.nok_with_text = True
+        self.assertTrue(srv._trigger_vision_and_wait().startswith(b"NOK "))
+
     def test_result_without_ocread_mode_gets_plain_ok_nok(self):
         recorded = []
         result = {"status": "OK", "text": "X" * 200, "detections": []}

@@ -1,0 +1,18 @@
+font_reader_blue.npz here: trained (QC_tools/train_font_reader.py --labels-from-folders --profile blue)
+on the 57 blue-bottle frames of the 2026-11-05 debug captures - only TWO codes,
+"6303 10:45 BB 05/28" (35 frames) and "6303 10:44 BB 05/28" (22 frames).
+
+For trying the blue profile on the bench only. Do NOT copy it to
+backend/detection/ocr/models/font_reader_blue.npz for production:
+
+- blue profile, this model, the 57 blue frames (half of them trained on):
+  43 correct, 0 WRONG, 14 NOK
+- blue profile, this model, the white 6303 10:43 bottle: read "6303 10:45" - WRONG.
+  It learned the two codes, not the font.
+- leave one bottle out: trained on 10:44 only, the 10:45 bottle read
+  6 correct, 3 WRONG ("10:49", "10:43"); trained on 10:45 only, the 10:44
+  bottle read 21 correct, 0 WRONG.
+
+Train the production model on shots of several blue bottles with different
+codes (all digits 0-9 in both lines) and check it with evaluate_images on a
+bottle it was not trained on.

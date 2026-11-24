@@ -1,8 +1,10 @@
+import concurrent.futures
 import anyio
 import cv2
 from fastapi import FastAPI, Request
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from backend.core.config_loader import cfg
@@ -12,7 +14,14 @@ import time
 log = get_logger(__name__)
 
 
-def create_app(camera, app_state, start_cycle=None) -> FastAPI:
+class ProfileChoice(BaseModel):
+    name: str
+
+
+def create_app(camera, app_state, start_cycle=None, profile_status=None, switch_profile=None) -> FastAPI:
+    """profile_status / switch_profile: backend/core/vision.py's, for the
+    HMI's product profile dropdown (None: no profiles - GET /profiles lists
+    none, POST /profile is 409)."""
     app = FastAPI()
 
     # flask-cors' CORS(app) defaults to allowing all origins/methods/headers
@@ -171,5 +180,27 @@ def create_app(camera, app_state, start_cycle=None) -> FastAPI:
     def reset_counters(request: Request):
         app_state.reset_counters()
         return {"status": "counters reset"}
+
+    # --- Product profiles (config/profiles/<name>.yaml) ---------------------
+    @app.get("/profiles")
+    def get_profiles(response: Response):
+        response.headers.update(_NO_STORE_HEADERS)
+        return profile_status() if profile_status else {"active": None, "profiles": []}
+
+    @app.post("/profile")
+    def set_profile(choice: ProfileChoice):
+        # Blocks until the vision thread has built the new engine (after a
+        # running read). The PLC trigger keeps working meanwhile: its reads
+        # queue behind the switch.
+        if switch_profile is None:
+            return Response(status_code=409, content="Product profiles are not available")
+        try:
+            status = switch_profile(choice.name)
+        except concurrent.futures.TimeoutError:
+            return JSONResponse(status_code=503, content={"error": "profile switch still running - try again"})
+        except Exception as exc:          # ProfileError and anything raised while loading it
+            log.error("Profile switch to %r refused: %s", choice.name, exc)
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        return status
 
     return app

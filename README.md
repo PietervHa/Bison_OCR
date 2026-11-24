@@ -62,6 +62,12 @@ The orchestration is `OCRead.read(frame)` in `backend/detection/ocread/engine.py
 
 ---
 
+## Product profiles
+
+The **PRODUCT** dropdown in the HMI header switches how the code is read, without a restart: `standard` (white, grey, silver and small bottles - the config file as it is) or `blue` (the blue HD-PE bottle: ink found in the blue channel, own model `font_reader_blue.npz`, trained on site). Profiles are `config/profiles/<name>.yaml` and override only the `ocr:` settings; the PLC behaviour is the same in every profile. Every result records its profile. See `docs/configuration.md`.
+
+---
+
 ## PLC connection (TCP)
 
 ```yaml
@@ -74,6 +80,8 @@ trigger:
 ```
 
 The PLC sends the trigger byte and the system runs one read. On OK the PLC receives the code text plus a newline, e.g. `4113 08:26 BB 05/26\n`. On anything else it receives `NOK\n`: a rejected read, no camera frame, a timeout, or a read longer than `max_text_length`. The PLC compares the code with the expected value itself.
+
+With `trigger.nok_with_text: true` a rejected read is sent as `NOK <what was read>\n`, e.g. `NOK 6303 10:49 BB 05/20\n` - the reader's best guess, for display only. The PLC must then check that the line *starts* with `NOK` (see `docs/VisionLinkTest.st`) and must never compare that text with the expected code. The HMI always shows it after the reason: `(not accepted: low_confidence) read: 6303 10:49 BB 05/20`.
 
 ---
 

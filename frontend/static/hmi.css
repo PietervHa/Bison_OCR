@@ -112,6 +112,41 @@ body {
     text-transform: uppercase;
 }
 
+/* Product profile dropdown (config/profiles/<name>.yaml). */
+.profile-picker {
+    font-family: var(--font-data);
+    font-size: 12px;
+    color: var(--steel);
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.profile-picker select {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--white);
+    background: var(--panel);
+    border: 1px solid var(--steel);
+    padding: 6px 10px;
+    min-width: 220px;
+    cursor: pointer;
+}
+
+.profile-picker select:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+.result-profile {
+    font-family: var(--font-data);
+    font-size: 13px;
+    color: var(--steel);
+    margin-top: -6px;
+}
+
 /* =========================
    WORKSPACE (camera + panel)
 ========================= */

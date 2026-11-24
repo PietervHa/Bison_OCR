@@ -1,0 +1,68 @@
+{
+ "images": 57,
+ "profile": "blue",
+ "scorer": "/home/claude/proj/backend/detection/ocr/models/font_reader.npz",
+ "used": 43,
+ "skipped": {
+  "':' not read at its position": 1,
+  "'B' not read at its position": 13
+ },
+ "no_fit_images": [
+  "20261105_091441_118.png",
+  "20261105_091339_638.png",
+  "20261105_091342_640.png",
+  "20261105_091323_851.png",
+  "20261105_091329_050.png",
+  "20261105_091353_794.png",
+  "20261105_091348_101.png",
+  "20261105_091350_659.png",
+  "20261105_091352_684.png",
+  "20261105_091329_676.png",
+  "20261105_091341_584.png",
+  "20261105_091348_978.png",
+  "20261105_091319_662.png",
+  "20261105_091349_736.png"
+ ],
+ "line1_chosen": {
+  "same minute": 43
+ },
+ "train_images": 21,
+ "test_images": 22,
+ "train_cells": 28315,
+ "classes": [
+  "0",
+  "1",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6",
+  "7",
+  "8",
+  "9",
+  "B",
+  ":",
+  "/",
+  "E",
+  "X",
+  "P",
+  "R",
+  "D"
+ ],
+ "formats": {
+  "BB": 43
+ },
+ "test_results": {
+  "new_BB": {
+   "correct": 21,
+   "NOK": 1
+  },
+  "old_BB": {
+   "correct": 17,
+   "WRONG": 4,
+   "NOK": 1
+  }
+ },
+ "wrong_examples": [],
+ "seconds": 37
+}

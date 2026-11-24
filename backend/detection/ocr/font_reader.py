@@ -134,11 +134,22 @@ def _deskew(ink, max_deg=30.0, first_deg=8.0, cache=None):
     return float(max(np.arange(coarse - 2.0, coarse + 2.01, 0.5), key=sharp))
 
 
-def _fit_lines(fit, n_lines=2):
+# Tallest text line (band) the line search tries, in crop px: characters
+# taller than this are cut at the top and bottom and no format fits. When
+# the best lines are this tall (the search hit the limit, so the text may
+# be taller) and ocr.read_validation.font_reader.tall_line_height_px is set
+# (passed in the PreparedCrop's speed dict), the lines are searched again up
+# to that height. Measured 2026-11-10: the P21/1 KT cap's characters are
+# taller than 45 px - 0 of 30 read, 28 of 30 with tall lines up to 64 px;
+# prints that fit in 45 px are not searched again, so they read as before.
+MAX_LINE_HEIGHT_PX = 45
+
+
+def _fit_lines(fit, n_lines=2, max_h=MAX_LINE_HEIGHT_PX):
     """Best n_lines (1 or 2) equal-height text bands: (score, [(y0, y1), ...])."""
     r = fit.sum(axis=1); H = len(r); t = 0.25 * r.max(); c = np.r_[0.0, np.cumsum(r - t)]
     best = (-1e18, None)
-    for h in range(8, min(45, H // 2) + 1):
+    for h in range(8, min(int(max_h), H // 2) + 1):
         if n_lines == 1:
             ys = np.arange(0, H - h + 1)
             s = c[ys + h] - c[ys]
@@ -468,17 +479,29 @@ class PreparedCrop:
                 self._rotated[key] = _rotate(self.ink()[0 if which == "boosted" else 1], ang)
         return self._rotated[key]
 
-    def _lines(self, flip, ang, n_lines):
+    def _fit_tall(self, fit, n_lines):
+        """_fit_lines(); searched again up to tall_line_height_px when every
+        best line is MAX_LINE_HEIGHT_PX tall (the text may be taller)."""
+        best = _fit_lines(fit, n_lines)
+        tall = int(self.speed.get("tall_line_height_px") or 0)
+        if tall > MAX_LINE_HEIGHT_PX and best[1] is not None and all(
+                y1 - y0 >= MAX_LINE_HEIGHT_PX for y0, y1 in best[1]):
+            return _fit_lines(fit, n_lines, tall)
+        return best
+
+    def _lines(self, flip, ang, n_lines, tall=False):
         """_fit_lines() on the rotated fit ink; flipped: the upright bands
-        mirrored (same score, the bands in reading order of the flipped crop)."""
-        key = (flip, ang, n_lines)
+        mirrored (same score, the bands in reading order of the flipped crop).
+        tall: _fit_tall() instead (lines taller than MAX_LINE_HEIGHT_PX)."""
+        key = (flip, ang, n_lines, tall)
         if key not in self._bands:
             if flip:
-                score, bands = self._lines(False, ang, n_lines)
+                score, bands = self._lines(False, ang, n_lines, tall)
                 H = self._rot("raw", False, ang).shape[0]
                 self._bands[key] = (score, None if bands is None else [(H - y1, H - y0) for y0, y1 in bands[::-1]])
             else:
-                self._bands[key] = self._timed("band_fit", _fit_lines, self._rot("raw", False, ang), n_lines)
+                self._bands[key] = self._timed("band_fit", self._fit_tall if tall else _fit_lines,
+                                               self._rot("raw", False, ang), n_lines)
         return self._bands[key]
 
     def angle(self, first_deg=8.0):
@@ -509,7 +532,13 @@ class PreparedCrop:
         centre half a pixel off and can differ by a pixel)."""
         ang = self.angle(first_deg)
         f = self._rot("raw", flip, ang)
-        score, bands = self._lines(flip, ang, len(template))
+        # Taller lines (tall_line_height_px) only for reading a two-line
+        # format: a one-line format, its second-line check and the printed
+        # ink of a second band keep the 45 px search - with taller lines the
+        # embossing beside a one-line print counted as a second line and the
+        # print was refused (OCReadEmbossingTests, 3 one-line test images).
+        tall = len(template) == 2 and bool(self.speed.get("tall_line_height_px"))
+        score, bands = self._lines(flip, ang, len(template), tall)
         fits = []
         for band, tl in zip(bands, template):
             near = line_pitch(fits[0]) if fits else None

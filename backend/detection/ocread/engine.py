@@ -25,7 +25,9 @@ read - failure_reason. backend/core/vision.py turns it into OK/NOK.
 
 A rejected read never carries a code: the font reader always fills every
 digit position with its best guess, so the decode of a rejected read is
-not a reading. It is only written to the debug capture.
+not a reading - "text" and "detections" stay empty. The decode is kept as
+"rejected_text", for display (HMI: after the reason) and, with
+trigger.nok_with_text, for the PLC after "NOK" - never as a code.
 """
 
 import os
@@ -41,6 +43,7 @@ from backend.detection.ocr.code_validator import (CodeTemplate, LINE1, REJECT_FO
                                                   plausible_line1)
 from backend.detection.ocr import grid_jit
 from backend.detection.ocr.font_reader import FontReader, PreparedCrop, ReadTimeout
+from backend.detection.ocr.ink_channel import InkChannel
 from backend.detection.ocr.text_locator import (locate_text_region, locate_text_region_scaled, deskew_crop,
                                                 row_profile_rect, alternative_rects, extend_rect_along_line)
 from backend.utils.logger import get_logger
@@ -81,15 +84,23 @@ def _same_rect(a, b) -> bool:
 class OCRead:
     """
     Reads the printed code from a camera frame with the trained dot-font reader.
+
+    config: the whole configuration dict (default: the loaded config file,
+    backend.core.config_loader.cfg); a product profile passes the config
+    with its overrides merged in (backend/core/profiles.py). profile_name:
+    the profile's name, recorded in every result as "profile" (None = not
+    recorded).
     """
-    def __init__(self):
-        ocr_cfg = cfg["ocr"]
+    def __init__(self, config=None, profile_name=None):
+        config = cfg if config is None else config
+        ocr_cfg = config["ocr"]
+        self.profile_name = profile_name
         # OpenCV's own worker threads (performance.cv_threads): on these
         # small crops 1-8 threads read equally fast, but with more than one
         # every parallel call waits for its slowest worker - under load a
         # busy core stalled the read - and the workers don't run at the
         # vision thread's priority. Process-wide; None = OpenCV's default.
-        cv_threads = (cfg.get("performance") or {}).get("cv_threads")
+        cv_threads = (config.get("performance") or {}).get("cv_threads")
         if cv_threads is not None:
             cv2.setNumThreads(int(cv_threads))
         self.downscale = float(ocr_cfg["downscale"])
@@ -100,6 +111,11 @@ class OCRead:
         if self.speed.get("grid_jit"):
             grid_jit.available()
         self.min_dim = int(ocr_cfg["min_dim"])
+        # The image the print is found and read on (ink_channel.py): None =
+        # the camera frame as it is (grayscale ink, the standard profile);
+        # set = one weighted channel of B, G, R that the whole read uses.
+        self.ink_channel = InkChannel.from_config(ocr_cfg.get("ink_channel"))
+        self._debug_color = None
 
         # Dynamic ROI: locates the printed text block via classical CV,
         # since the text doesn't land in the same place on every bottle.
@@ -145,6 +161,9 @@ class OCRead:
         self._last_located = None
         # Second attempt at the print's row angle for a read that failed
         # (see read()); accepted only past these stricter gates.
+        # Deskewed crops hold the whole rect also near the frame edge
+        # (text_locator.deskew_crop, whole_rect). Off = the crop as before.
+        self.deskew_whole_rect = bool(dynamic_roi_cfg.get("deskew_whole_rect", False))
         self.row_angle_retry = bool(dynamic_roi_cfg.get("row_angle_retry", False))
         self.row_angle_retry_min_diff_deg = float(dynamic_roi_cfg.get("row_angle_retry_min_diff_deg", 3.0))
         self.row_angle_retry_min_confidence = float(dynamic_roi_cfg.get("row_angle_retry_min_digit_confidence", 0.9))
@@ -174,6 +193,11 @@ class OCRead:
         self.unavailable_reason = None
         fr_cfg = val_cfg.get("font_reader") if isinstance(val_cfg.get("font_reader"), dict) else {}
         try:
+            # Text taller than font_reader.MAX_LINE_HEIGHT_PX (45 px): lines
+            # searched again up to this height (handed to every PreparedCrop
+            # with speed). Not set / 0: off.
+            if fr_cfg.get("tall_line_height_px"):
+                self.speed["tall_line_height_px"] = int(fr_cfg["tall_line_height_px"])
             model = fr_cfg.get("model") or None
             font_reader = FontReader(
                 resolve_project_path(model) if model else None,
@@ -196,7 +220,9 @@ class OCRead:
             log.error("OCRead unavailable (%s) - every read will be NOK (ocr_engine_error).",
                       self.unavailable_reason)
         else:
-            log.info("OCRead: font reader, formats=%s", [f.lines for f in self._read_formats()])
+            log.info("OCRead%s: font reader, formats=%s%s", f" [{profile_name}]" if profile_name else "",
+                     [f.lines for f in self._read_formats()],
+                     f", ink channel {self.ink_channel.describe()}" if self.ink_channel else "")
             for lines in self.skipped_formats:
                 log.warning("OCRead: format %s skipped - the font reader model does not support it", lines)
 
@@ -220,6 +246,13 @@ class OCRead:
             self.dynamic_roi_debug_dir = debug_dir
             self.time_check = time_check
         return round((time.perf_counter() - t) * 1000, 1)
+
+    def ink_frame(self, frame):
+        """The frame as this engine reads it: its ink channel
+        (ocr.ink_channel, ink_channel.py) as a grey BGR image, or the frame
+        itself (the same object) without one. read() does this first;
+        QC_tools/train_font_reader.py does it before _prepare()."""
+        return frame if self.ink_channel is None else self.ink_channel.apply(frame)
 
     @property
     def validator(self):
@@ -342,7 +375,7 @@ class OCRead:
                                                         morph_threads=int(self.speed.get("locate_threads", 1))),
                                             float(self.speed.get("locate_scale", 1.0)),
                                             float(self.speed.get("locate_threshold_scale", 1.0)),
-                                            debug_dir=self.dynamic_roi_debug_dir)
+                                            debug_dir=self.dynamic_roi_debug_dir, debug_color=self._debug_color)
         self._last_located = located or None
         if not located:
             log.debug("Dynamic ROI: no text region found on this frame - running OCR on the full frame.")
@@ -353,7 +386,8 @@ class OCRead:
         # Extra margin here, beyond dynamic_roi.padding_px (which is already
         # baked into rotated_rect). Changing it changes the crop the font
         # reader sees, so re-check reads on real frames before touching it.
-        crop = deskew_crop(frame, rotated_rect, extra_padding_px=20) if rotated_rect else None
+        crop = (deskew_crop(frame, rotated_rect, extra_padding_px=20, whole_rect=self.deskew_whole_rect)
+                if rotated_rect else None)
         if crop is None:
             # Degenerate rotated rect (shouldn't normally happen) - use
             # the axis-aligned box we already computed rather than the
@@ -458,7 +492,7 @@ class OCRead:
         first = located.get("rotated_rect") if located else None
 
         def prepared(rect):
-            crop = deskew_crop(frame, rect, extra_padding_px=20)
+            crop = deskew_crop(frame, rect, extra_padding_px=20, whole_rect=self.deskew_whole_rect)
             return None if crop is None else PreparedCrop(self._downscale_roi(crop), deadline, self.print_ink_ratio,
                                                           self.speed)
 
@@ -546,7 +580,7 @@ class OCRead:
                 if box is not None:
                     moved = dict(box, center=[box["center"][0] + dx, box["center"][1] + dy], angle=box["angle"] + da,
                                  size=[box["size"][0] * scale, box["size"][1] * scale])
-                    c = deskew_crop(frame, moved, extra_padding_px=20)
+                    c = deskew_crop(frame, moved, extra_padding_px=20, whole_rect=self.deskew_whole_rect)
                     c = None if c is None else self._downscale_roi(c)
                 else:
                     # The crop itself moved like the box: turned about its
@@ -598,15 +632,24 @@ class OCRead:
         a test image's file name; None = unknown, the check is skipped).
         """
         if self.font_reader is None:
-            return {
+            result = {
                 "detections": [],
                 "text": "",
                 "processing_time_ms": 0.0,
                 "mode": MODE,
                 "error": self.unavailable_reason or "font reader unavailable",
             }
+            if self.profile_name is not None:
+                result["profile"] = self.profile_name
+            return result
 
         t0 = time.perf_counter()
+        # Product profile with an ink channel (ink_channel.py): from here on
+        # the frame IS that channel - locate, crops, retries, agreement and
+        # the ink maps all use it. The colour frame is kept for the debug
+        # capture only. Without one the frame is used as it is.
+        self._debug_color = frame if self.ink_channel is not None and self.dynamic_roi_debug_dir else None
+        frame = self.ink_frame(frame)
         self._capture_time = capture_time
         if self.time_check and capture_time is None:
             if not self._time_skip_logged:
@@ -682,11 +725,16 @@ class OCRead:
             "text": text,
             "processing_time_ms": round(elapsed, 1),
             "mode": MODE,
+            # What the reader made of a rejected read (its best guess, not a
+            # reading): shown after the reason, never used as the code.
+            **({"rejected_text": r["text"]} if r is not None and not accepted and r.get("text") else {}),
             "validation": {"accepted": accepted, "reason": reason, "reads": [read_summary], "fusion": None,
                            "format": validator.lines if validator else None},
         }
         if not accepted:
             result["failure_reason"] = reason
+        if self.profile_name is not None:
+            result["profile"] = self.profile_name
         if profile:
             result["_profile_ms"] = profile_data
         return result

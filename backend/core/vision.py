@@ -8,6 +8,8 @@ OK/NOK status.
 
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from backend.core import config_loader, profiles
 from backend.core.config_loader import cfg
 from backend.detection.ocread.engine import MODE, OCRead
 from backend.utils.logger import get_logger
@@ -18,6 +20,8 @@ logger = get_logger(__name__)
 
 # Global instances managed by this module
 ocr_instance = None
+# Name of the product profile ocr_instance reads with (backend/core/profiles.py).
+active_profile = None
 
 def _init_worker() -> None:
     """Runs once on the vision thread: its priority
@@ -29,15 +33,109 @@ def _init_worker() -> None:
 _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision_worker", initializer=_init_worker)
 
 
+def build_engine(name: str) -> OCRead:
+    """An OCRead engine for product profile `name` (the config file with the
+    profile's ocr overrides), warmed up when ocr.speed.warmup is set.
+    Raises profiles.ProfileError for a profile that does not exist or is
+    invalid."""
+    engine = OCRead(profiles.config_for(name), profile_name=name)
+    if engine.speed.get("warmup") and engine.font_reader is not None:
+        logger.info("OCRead [%s] warm-up: %.0f ms", name, engine.warmup())
+    return engine
+
+
+def _state_file() -> Path:
+    """Where the profile chosen on the HMI is remembered: one file per
+    config file, so test runs (default.yaml) and production
+    (production.yaml) each keep their own."""
+    stem = Path(config_loader.config_path_loaded or "default").stem
+    return profiles.PROJECT_ROOT / "data" / f"active_profile_{stem}.txt"
+
+
+def _remembered_profile():
+    try:
+        name = _state_file().read_text(encoding="utf-8").strip()
+        return name or None
+    except OSError:
+        return None
+
+
+def _remember_profile(name: str) -> None:
+    if not (cfg.get("profiles") or {}).get("remember", True):
+        return
+    try:
+        path = _state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not save the active profile (%s): %s", name, exc)
+
+
+def startup_profile() -> str:
+    """profiles.default, or the profile last chosen on the HMI when
+    profiles.remember is on and that profile still exists."""
+    p_cfg = cfg.get("profiles") or {}
+    name = str(p_cfg.get("default") or profiles.STANDARD)
+    if p_cfg.get("remember", True):
+        remembered = _remembered_profile()
+        if remembered and remembered in profiles.names():
+            name = remembered
+    return name
+
+
 def bind_app_state(app_state) -> None:
     """
-    Initializes the OCRead engine. app_state is accepted for the caller's
-    convenience; the engine itself needs no application state.
+    Initializes the OCRead engine with the startup profile (startup_profile).
+    A startup profile that cannot be loaded or has no usable font reader
+    falls back to "standard" (logged as an error). app_state is accepted for
+    the caller's convenience; the engine itself needs no application state.
     """
-    global ocr_instance
-    ocr_instance = OCRead()
-    if (cfg["ocr"].get("speed") or {}).get("warmup") and ocr_instance.font_reader is not None:
-        logger.info("OCRead warm-up: %.0f ms", ocr_instance.warmup())
+    global ocr_instance, active_profile
+    name = startup_profile()
+    engine = None
+    try:
+        engine = build_engine(name)
+    except Exception as exc:
+        logger.error("Profile %r could not be loaded: %s", name, exc)
+    if (engine is None or engine.font_reader is None) and name != profiles.STANDARD:
+        logger.error("Profile %r is not usable - starting with profile %r", name, profiles.STANDARD)
+        name, engine = profiles.STANDARD, build_engine(profiles.STANDARD)
+    ocr_instance, active_profile = engine, name
+    logger.info("Product profile: %s", name)
+
+
+def profile_status() -> dict:
+    """The active profile and every profile the HMI can choose from."""
+    return {"active": active_profile, "profiles": [profiles.describe(n) for n in profiles.names()]}
+
+
+def _switch(name: str) -> dict:
+    global ocr_instance, active_profile
+    engine = build_engine(name)
+    if engine.font_reader is None:
+        raise profiles.ProfileError(f"profile {name!r} cannot read: {engine.unavailable_reason}")
+    previous = active_profile
+    ocr_instance, active_profile = engine, name
+    _remember_profile(name)
+    logger.warning("Product profile switched: %s -> %s", previous, name)
+    return profile_status()
+
+
+def switch_profile(name: str, timeout_s: float = 60.0) -> dict:
+    """Switch to product profile `name` without a restart. The new engine is
+    built (and warmed up) on the vision thread itself, queued like a read:
+    a read that is running finishes with the old profile, every read
+    started after it uses the new one, and no read ever runs during the
+    swap. A profile that cannot be loaded or cannot read (model missing,
+    no supported format) raises profiles.ProfileError and the active
+    profile stays as it was. Returns profile_status()."""
+    return _pool.submit(_switch, name).result(timeout=timeout_s)
+
+
+def _read(frame, **kwargs):
+    """The active engine's read, looked up when the read starts (not when it
+    was queued): a read queued behind a profile switch uses the new profile."""
+    return ocr_instance.read(frame, **kwargs)
 
 
 def _normalize_detections(result: dict) -> list:
@@ -183,7 +281,7 @@ def run_vision(frame, callback=None, profile: bool = False, capture_time=None):
         return normalized
 
     if callback:
-        _run_with_callback(ocr_instance.read, frame, callback, profile=profile, capture_time=capture_time)
+        _run_with_callback(_read, frame, callback, profile=profile, capture_time=capture_time)
         return None
     kwargs = {"capture_time": capture_time} if capture_time is not None else {}
     return _normalize_result(ocr_instance.read(frame, profile=profile, **kwargs))
